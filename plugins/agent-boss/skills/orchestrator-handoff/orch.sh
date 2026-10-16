@@ -60,9 +60,10 @@ _r=${ORCH_REPO:-}; _l=${ORCH_LOCK:-}; _h=${ORCH_SNAPSHOT_HOOK:-}; _p=${ORCH_PROJ
 _x=${ORCH_LANE_PROMPT_EXTRA:-}; _m=${ORCH_LANE_PERMISSION_MODE:-}; _c=${ORCH_CTX:-}; _w=${ORCH_CTX_WARN_PCT:-}
 # Settings that run programs (lock, hook) come only from the environment or
 # ~/.config/agent-boss/config, never from the handover dir's own conf.
-_ul=${ORCH_LOCK:-}; _uh=${ORCH_SNAPSHOT_HOOK:-}
+# The lane permission mode is trusted-only too, so a handover dir can't raise it.
+_ul=${ORCH_LOCK:-}; _uh=${ORCH_SNAPSHOT_HOOK:-}; _um=${ORCH_LANE_PERMISSION_MODE:-}
 load_conf "$DIR/agent-boss.conf"
-ORCH_LOCK=$_ul; ORCH_SNAPSHOT_HOOK=$_uh
+ORCH_LOCK=$_ul; ORCH_SNAPSHOT_HOOK=$_uh; ORCH_LANE_PERMISSION_MODE=$_um
 REPO=${_r:-${ORCH_REPO:-}}                  # owner/name for gh PR lists; empty = skip
 LOCK=${_l:-${ORCH_LOCK:-}}                  # build-lock script with a `who` command; empty = skip
 HOOK=${_h:-${ORCH_SNAPSHOT_HOOK:-}}         # script whose stdout joins the snapshot (machine checks)
@@ -70,6 +71,7 @@ PROJECT=${_p:-${ORCH_PROJECT:-this project}}
 USERNAME=${_u:-${ORCH_USER:-the user}}
 EXTRA=${_x:-${ORCH_LANE_PROMPT_EXTRA:-}}
 PERM=${_m:-${ORCH_LANE_PERMISSION_MODE:-auto}}
+case "$PERM" in auto|default|acceptEdits|plan) ;; *) echo "ORCH_LANE_PERMISSION_MODE must be auto, default, acceptEdits or plan (got '$PERM')"; exit 2 ;; esac
 CTX=${_c:-${ORCH_CTX:-200000}}
 WARN_PCT=${_w:-${ORCH_CTX_WARN_PCT:-10}}
 case "$LOCK" in ""|/*) ;; *) LOCK=$DIR/$LOCK ;; esac
