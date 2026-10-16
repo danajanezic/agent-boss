@@ -24,7 +24,19 @@
 SELF_PATH=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 TEMPLATES=$(dirname "$SELF_PATH")/templates
 _env_dir=${ORCH_DIR:-}
-[ -f "$HOME/.config/agent-boss/config" ] && . "$HOME/.config/agent-boss/config"
+# Config files are read as plain ORCH_NAME="value" lines, never run as shell code,
+# so a handover dir you didn't write can't run commands through its config.
+load_conf() {
+  [ -f "$1" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ORCH_*=*) ;; *) continue ;; esac
+    k=${line%%=*}; v=${line#*=}
+    case "$k" in *[!A-Z_]*) continue ;; esac
+    case "$v" in \"*\") v=${v#\"}; v=${v%\"} ;; \'*\') v=${v#\'}; v=${v%\'} ;; esac
+    eval "$k=\$v"
+  done < "$1"
+}
+load_conf "$HOME/.config/agent-boss/config"
 [ -n "$_env_dir" ] && ORCH_DIR=$_env_dir
 
 if [ "$1" = "init" ]; then
@@ -46,7 +58,7 @@ DIR=$ORCH_DIR
 # Project settings; env values set before this point win.
 _r=${ORCH_REPO:-}; _l=${ORCH_LOCK:-}; _h=${ORCH_SNAPSHOT_HOOK:-}; _p=${ORCH_PROJECT:-}; _u=${ORCH_USER:-}
 _x=${ORCH_LANE_PROMPT_EXTRA:-}; _m=${ORCH_LANE_PERMISSION_MODE:-}; _c=${ORCH_CTX:-}; _w=${ORCH_CTX_WARN_PCT:-}
-[ -f "$DIR/agent-boss.conf" ] && . "$DIR/agent-boss.conf"
+load_conf "$DIR/agent-boss.conf"
 REPO=${_r:-${ORCH_REPO:-}}                  # owner/name for gh PR lists; empty = skip
 LOCK=${_l:-${ORCH_LOCK:-}}                  # build-lock script with a `who` command; empty = skip
 HOOK=${_h:-${ORCH_SNAPSHOT_HOOK:-}}         # script whose stdout joins the snapshot (machine checks)

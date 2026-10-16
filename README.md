@@ -34,6 +34,10 @@ A snapshot hook is any script that prints status lines, for example:
 ssh -o ConnectTimeout=8 build-box 'echo "build-box: $(uptime | sed "s/.*averages: //"), $(df -Pk / | tail -1 | awk "{printf \"%d GB free\", \$4/1048576}")"'
 ```
 
+## Security
+
+`orch.sh` reads `agent-boss.conf` and `~/.config/agent-boss/config` as plain `ORCH_NAME="value"` lines and never runs them as shell code. `ORCH_LOCK` and `ORCH_SNAPSHOT_HOOK` do name scripts that `snapshot` and `check-lane` run, so only point `ORCH_DIR` at handover dirs you trust.
+
 ## Requirements
 
 - Claude Code with background sessions (`claude --bg`, `claude agents --json`, `claude stop`) and cross-session SendMessage. Tested with 2.1.302.
