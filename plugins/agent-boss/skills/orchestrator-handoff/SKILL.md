@@ -31,6 +31,7 @@ Commands:
 - `archive`, `check-handoff`: the orchestrator handoff file.
 - `claim <role> [--force]`, `drop <role>`, `addr <role>`, `roles`, `show`: the role registry.
 - `check-lane`, `size`, `stop-lane`, `start-lane <role>`: lane transitions.
+- `brief <role>`: what a subagent needs to work as that role (model, start dir, files to read, live holder). `/agent-boss:spawn <role> <task>` uses it to start an in-session role subagent.
 
 `claim` refuses a role that a live session holds unless you pass `--force`, which is only for a planned handoff. Claiming `orchestrator` moves the previous holder to `orchestrator-helper`, or to `orchestrator-helper-<id>` if a live helper already exists. One helper is enough: the new orchestrator picks one, and the others end.
 

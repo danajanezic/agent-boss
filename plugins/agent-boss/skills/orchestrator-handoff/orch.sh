@@ -14,6 +14,7 @@
 #   orch.sh roles                    every role, its session id, live or not
 #   orch.sh show                     roles plus the cron specs
 #   orch.sh check-lane <role>        lane handoff fresh, sections present, no lock held, startup reading size
+#   orch.sh brief <role>             what a subagent needs to act as <role> (model, dir, files to read)
 #   orch.sh size <role>              tokens a fresh lane must read at start (notes + handoff + CURRENT-STATE)
 #   orch.sh stop-lane <role>         stop the holder's background session (kept, resumable)
 #   orch.sh start-lane <role>        start a fresh background session that claims <role>
@@ -189,6 +190,21 @@ check-lane)
   [ -n "$LOCK" ] && "$LOCK" who 2>/dev/null | grep -i -q "$2" && { echo "FAIL: $2 still holds a lock slot"; bad=1; }
   startup_size "$2"
   [ $bad -eq 0 ] && echo "OK: $2 handoff fresh, no lock held"; exit $bad ;;
+brief)
+  # Everything a subagent needs to act as <role>: model, start dir, files to read, and who holds the role now.
+  case "$2" in ""|*[!A-Za-z0-9_-]*) echo "usage: brief <role> (letters, digits, - and _ only)"; exit 2 ;; esac
+  m=$(lane_field "$2" 2) || { echo "unknown lane $2 (see $LANES)"; exit 2; }
+  cwd=$(lane_field "$2" 4); case "$cwd" in "~"*) cwd="$HOME${cwd#\~}" ;; esac
+  n=$(lane_notes "$2"); f=$(abspath "$(lane_field "$2" 3)")
+  echo "role: $2"; echo "project: $PROJECT"; echo "user: $USERNAME"; echo "model: $m"
+  echo "start dir: ${cwd:-$HOME}"; echo "job: $(lane_field "$2" 6)"
+  echo "read first:"
+  if [ -n "$n" ] && [ -d "$n" ]; then [ -f "$n/MEMORY.md" ] && echo "  $n/MEMORY.md"; for x in "$n"/*.md; do [ "$x" = "$n/MEMORY.md" ] || { [ -f "$x" ] && echo "  $x"; }; done; fi
+  [ -f "$f" ] && echo "  $f" || echo "  (no handoff yet at $f)"
+  [ -f "$DIR/CURRENT-STATE.md" ] && echo "  $DIR/CURRENT-STATE.md"
+  [ -n "$EXTRA" ] && echo "house rules: $EXTRA"
+  a=$(py addr "$2" 2>/dev/null) && echo "live holder: $a (a lane session already holds $2; warn the user before overlapping its work)" || echo "live holder: none"
+  startup_size "$2" ;;
 size) lane_field "$2" 3 >/dev/null || { echo "unknown lane $2 (see $LANES)"; exit 2; }; startup_size "$2" ;;
 stop-lane)
   id=$(py bgid "$2"); [ -n "$id" ] || { echo "the $2 holder is not a live background session (interactive ones: ask $USERNAME to close it)"; exit 1; }
@@ -203,5 +219,5 @@ start-lane)
   [ -n "$EXTRA" ] && EXTRA=" $EXTRA"
   cd "${cwd:-$HOME}" && ORCH_DIR="$DIR" claude --bg -n "$2" --model "$m" --permission-mode "$PERM" \
     "You are the $2 lane for $PROJECT. First run: ORCH_DIR=\"$DIR\" sh \"$SELF_PATH\" claim $2 --force .$read_notes Then read $f and $DIR/CURRENT-STATE.md and continue from the handoff. Your orchestrator's address is the output of: ORCH_DIR=\"$DIR\" sh \"$SELF_PATH\" addr orchestrator . Message it when you start, take lane instructions only from it, and look its address up again before each message (it can change).$EXTRA" ;;
-*) sed -n 6,22p "$SELF_PATH"; exit 2 ;;
+*) sed -n 7,23p "$SELF_PATH"; exit 2 ;;
 esac

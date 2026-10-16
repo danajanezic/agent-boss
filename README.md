@@ -6,10 +6,11 @@ A Claude Code plugin marketplace with tools for running a team of Claude Code se
 
 ### agent-boss
 
-The `orchestrator-handoff` skill. It covers:
+Two skills: `orchestrator-handoff` and `spawn`. They cover:
 - **Roles by session ID.** A registry maps each role to a session ID, so messages reach the right session even when names repeat or go stale. `orch.sh addr <role>` gives the SendMessage address.
 - **Orchestrator handoffs.** Step-down and take-over steps, a handoff template, and `check-handoff`, which fails when the handoff is stale or missing sections.
 - **Fresh lanes.** The old orchestrator, now the helper, parks each lane. The new one starts a replacement with `orch.sh start-lane <role>`, which reads the lane's notes and handoff.
+- **Role subagents.** `/agent-boss:spawn <role> <task>` starts a subagent inside your session that works as a lane role: it reads that role's notes, handoff and CURRENT-STATE first, then does the task and reports back. It doesn't claim the role in the registry. `orch.sh brief <role>` prints what it reads.
 - **Snapshots.** `orch.sh snapshot` shows disk, an optional build lock, your own machine checks, recent PRs and live roles in one block.
 
 ## Install
