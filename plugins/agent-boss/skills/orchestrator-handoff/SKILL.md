@@ -14,7 +14,7 @@ orch addr orchestrator   # -> uds:/tmp/cc-socks/<pid>.sock, or OFFLINE <id> (exi
 Look the address up again before each message, because the pid changes when a session restarts. Session names are only labels for people, and nothing depends on them.
 
 ## Setup (once per project)
-`orch init <dir>` creates a handover dir with starter files. Then edit `agent-boss.conf` (project name, user, GitHub repo, optional build lock and snapshot hook) and `orchestrator-lanes.tsv`, and point sessions at the dir with `ORCH_DIR` or `~/.config/agent-boss/config` (`ORCH_DIR="/path/to/dir"`). If `orch` says ORCH_DIR is not set, ask the user which handover dir to use; don't guess.
+`orch init <dir>` creates a handover dir with starter files. Then edit `agent-boss.conf` (project name, user, GitHub repo) and `orchestrator-lanes.tsv`, and point sessions at the dir with `ORCH_DIR` or `~/.config/agent-boss/config` (`ORCH_DIR="/path/to/dir"`, plus the optional `ORCH_LOCK` and `ORCH_SNAPSHOT_HOOK`, which run programs and so are never read from the handover dir). If `orch` says ORCH_DIR is not set, ask the user which handover dir to use; don't guess.
 
 Files in the handover dir:
 - `agent-boss.conf`: project settings (environment variables of the same names win).

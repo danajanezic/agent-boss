@@ -24,7 +24,7 @@ Run the skill as `/agent-boss:orchestrator-handoff`, for example `/agent-boss:or
 ## Set up a project
 
 1. Create a handover dir: `sh <plugin>/skills/orchestrator-handoff/orch.sh init ~/code/my-project-handover`. Or ask Claude to run `orch init` for you after installing.
-2. Edit `agent-boss.conf` there (project name, your name, GitHub repo, optional build lock and snapshot hook) and `orchestrator-lanes.tsv` (one row per lane).
+2. Edit `agent-boss.conf` there (project name, your name, GitHub repo) and `orchestrator-lanes.tsv` (one row per lane). An optional build lock (`ORCH_LOCK`) and snapshot hook (`ORCH_SNAPSHOT_HOOK`) go in `~/.config/agent-boss/config`.
 3. Point sessions at the dir: `mkdir -p ~/.config/agent-boss && echo 'ORCH_DIR="$HOME/code/my-project-handover"' > ~/.config/agent-boss/config`. An `ORCH_DIR` environment variable overrides it.
 
 A snapshot hook is any script that prints status lines, for example:
@@ -36,7 +36,10 @@ ssh -o ConnectTimeout=8 build-box 'echo "build-box: $(uptime | sed "s/.*averages
 
 ## Security
 
-`orch.sh` reads `agent-boss.conf` and `~/.config/agent-boss/config` as plain `ORCH_NAME="value"` lines and never runs them as shell code. `ORCH_LOCK` and `ORCH_SNAPSHOT_HOOK` do name scripts that `snapshot` and `check-lane` run, so only point `ORCH_DIR` at handover dirs you trust.
+- `orch.sh` reads `agent-boss.conf` and `~/.config/agent-boss/config` as plain `ORCH_NAME="value"` lines and never runs them as shell code.
+- `ORCH_LOCK` and `ORCH_SNAPSHOT_HOOK` name scripts that run, so they are accepted only from the environment or `~/.config/agent-boss/config`, never from a handover dir's own `agent-boss.conf`.
+- `start-lane` refuses an `ORCH_DIR` or script path containing a quote, backtick, `$` or backslash, because those paths go into the command line the new session runs.
+- Agents read the handover dir's handoffs, notes and settings as instructions, and lanes start in `auto` permission mode by default. Only use handover dirs you trust.
 
 ## Requirements
 

@@ -58,7 +58,11 @@ DIR=$ORCH_DIR
 # Project settings; env values set before this point win.
 _r=${ORCH_REPO:-}; _l=${ORCH_LOCK:-}; _h=${ORCH_SNAPSHOT_HOOK:-}; _p=${ORCH_PROJECT:-}; _u=${ORCH_USER:-}
 _x=${ORCH_LANE_PROMPT_EXTRA:-}; _m=${ORCH_LANE_PERMISSION_MODE:-}; _c=${ORCH_CTX:-}; _w=${ORCH_CTX_WARN_PCT:-}
+# Settings that run programs (lock, hook) come only from the environment or
+# ~/.config/agent-boss/config, never from the handover dir's own conf.
+_ul=${ORCH_LOCK:-}; _uh=${ORCH_SNAPSHOT_HOOK:-}
 load_conf "$DIR/agent-boss.conf"
+ORCH_LOCK=$_ul; ORCH_SNAPSHOT_HOOK=$_uh
 REPO=${_r:-${ORCH_REPO:-}}                  # owner/name for gh PR lists; empty = skip
 LOCK=${_l:-${ORCH_LOCK:-}}                  # build-lock script with a `who` command; empty = skip
 HOOK=${_h:-${ORCH_SNAPSHOT_HOOK:-}}         # script whose stdout joins the snapshot (machine checks)
@@ -192,6 +196,7 @@ start-lane)
   f=$(abspath "$(lane_field "$2" 3)"); cwd=$(lane_field "$2" 4); notes=$(lane_notes "$2")
   case "$cwd" in "~"*) cwd="$HOME${cwd#\~}" ;; esac
   py addr "$2" >/dev/null 2>&1 && { echo "$2 is held by a live session ($(py addr "$2")); stop it first"; exit 1; }
+  case "$DIR$SELF_PATH" in *[\"\`\$\\]*) echo "refusing: ORCH_DIR or the script path contains a quote, backtick, \$ or backslash"; exit 2 ;; esac
   read_notes=""; [ -n "$notes" ] && read_notes=" Before any work, read every note in $notes (MEMORY.md first): they are this lane's standing rules from $USERNAME."
   [ -n "$EXTRA" ] && EXTRA=" $EXTRA"
   cd "${cwd:-$HOME}" && ORCH_DIR="$DIR" claude --bg -n "$2" --model "$m" --permission-mode "$PERM" \
