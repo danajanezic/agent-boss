@@ -1,0 +1,3 @@
+# role	model	handoff file (relative to the handover dir)	start dir	required notes dir (read all, MEMORY.md first; "-" = none)	what the lane does
+frontend	opus	lane-handoffs/frontend.md	~/code/my-project	lane-notes/frontend	UI work and screenshots
+backend	sonnet	lane-handoffs/backend.md	~/code/my-project	-	server, data and tests

@@ -1,0 +1,14 @@
+{
+  "name": "agent-boss",
+  "owner": { "name": "danajanezic" },
+  "metadata": {
+    "description": "Tools for running a team of Claude Code sessions: an orchestrator, lanes, and clean handoffs between them."
+  },
+  "plugins": [
+    {
+      "name": "agent-boss",
+      "source": "./plugins/agent-boss",
+      "description": "Orchestrator and lane handoffs for multi-session Claude Code work: roles held by session ID, handoff checks, and fresh lane sessions."
+    }
+  ]
+}
