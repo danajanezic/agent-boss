@@ -14,6 +14,8 @@
 #   orch.sh roles                    every role, its session id, live or not
 #   orch.sh show                     roles plus the cron specs
 #   orch.sh check-lane <role>        lane handoff fresh, sections present, no lock held, startup reading size
+#   orch.sh lanes                    list the lanes in orchestrator-lanes.tsv
+#   orch.sh add-lane <role> <model> <dir> <job>  add a lane row (see /agent-boss:define-role)
 #   orch.sh brief <role>             what a subagent needs to act as <role> (model, dir, files to read)
 #   orch.sh size <role>              tokens a fresh lane must read at start (notes + handoff + CURRENT-STATE)
 #   orch.sh stop-lane <role>         stop the holder's background session (kept, resumable)
@@ -190,6 +192,21 @@ check-lane)
   [ -n "$LOCK" ] && "$LOCK" who 2>/dev/null | grep -i -q "$2" && { echo "FAIL: $2 still holds a lock slot"; bad=1; }
   startup_size "$2"
   [ $bad -eq 0 ] && echo "OK: $2 handoff fresh, no lock held"; exit $bad ;;
+lanes)
+  [ -f "$LANES" ] || { echo "no lanes file at $LANES"; exit 1; }
+  grep -v '^#' "$LANES" | awk -F'\t' 'NF{printf "- %s (%s): %s\n", $1, $2, $6}' ;;
+add-lane)
+  # add-lane <role> <model> <start dir> <job>: one row, with handoff lane-handoffs/<role>.md and notes lane-notes/<role>
+  case "$2" in ""|*[!a-z0-9-]*) echo "usage: add-lane <role> <model> <start dir> <job>   (role: lowercase letters, digits and -)"; exit 2 ;; esac
+  case "$2" in orchestrator|orchestrator-helper*) echo "refusing: $2 is a built-in role"; exit 2 ;; esac
+  [ -n "$3" ] && [ -n "$4" ] && [ -n "$5" ] || { echo "usage: add-lane <role> <model> <start dir> <job>"; exit 2; }
+  for v in "$3" "$4" "$5"; do case "$v" in *"$(printf '\t')"*|*"
+"*) echo "refusing: fields can't contain tabs or newlines"; exit 2 ;; esac; done
+  [ -f "$LANES" ] || cp "$TEMPLATES/orchestrator-lanes.tsv" "$LANES"
+  lane_field "$2" 1 >/dev/null && { echo "lane $2 already exists in $LANES; edit that row instead"; exit 1; }
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$2" "$3" "lane-handoffs/$2.md" "$4" "lane-notes/$2" "$5" >> "$LANES"
+  mkdir -p "$DIR/lane-handoffs" "$DIR/lane-notes/$2"
+  echo "added $2 to $LANES; notes go in $DIR/lane-notes/$2/ (MEMORY.md first), handoff in $DIR/lane-handoffs/$2.md" ;;
 brief)
   # Everything a subagent needs to act as <role>: model, start dir, files to read, and who holds the role now.
   case "$2" in ""|*[!A-Za-z0-9_-]*) echo "usage: brief <role> (letters, digits, - and _ only)"; exit 2 ;; esac
@@ -219,5 +236,5 @@ start-lane)
   [ -n "$EXTRA" ] && EXTRA=" $EXTRA"
   cd "${cwd:-$HOME}" && ORCH_DIR="$DIR" claude --bg -n "$2" --model "$m" --permission-mode "$PERM" \
     "You are the $2 lane for $PROJECT. First run: ORCH_DIR=\"$DIR\" sh \"$SELF_PATH\" claim $2 --force .$read_notes Then read $f and $DIR/CURRENT-STATE.md and continue from the handoff. Your orchestrator's address is the output of: ORCH_DIR=\"$DIR\" sh \"$SELF_PATH\" addr orchestrator . Message it when you start, take lane instructions only from it, and look its address up again before each message (it can change).$EXTRA" ;;
-*) sed -n 7,23p "$SELF_PATH"; exit 2 ;;
+*) sed -n 7,25p "$SELF_PATH"; exit 2 ;;
 esac

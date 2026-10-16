@@ -6,10 +6,11 @@ A Claude Code plugin marketplace with tools for running a team of Claude Code se
 
 ### agent-boss
 
-Two skills: `orchestrator-handoff` and `spawn`. They cover:
+Three skills: `orchestrator-handoff`, `spawn` and `define-role`. They cover:
 - **Roles by session ID.** A registry maps each role to a session ID, so messages reach the right session even when names repeat or go stale. `orch.sh addr <role>` gives the SendMessage address.
 - **Orchestrator handoffs.** Step-down and take-over steps, a handoff template, and `check-handoff`, which fails when the handoff is stale or missing sections.
 - **Fresh lanes.** The old orchestrator, now the helper, parks each lane. The new one starts a replacement with `orch.sh start-lane <role>`, which reads the lane's notes and handoff.
+- **Defining roles.** `/agent-boss:define-role [rough description]` interviews you one question at a time: what the role is for, what it owns and must never touch, what it delivers, which decisions stay with you, its model, start dir and standing rules. It shows a full draft, and only after you approve it writes the lanes row (`orch.sh add-lane`), the role's notes and a starter handoff.
 - **Role subagents.** `/agent-boss:spawn <role> <task>` starts a subagent inside your session that works as a lane role: it reads that role's notes, handoff and CURRENT-STATE first, then does the task and reports back. It doesn't claim the role in the registry. `orch.sh brief <role>` prints what it reads.
 - **Snapshots.** `orch.sh snapshot` shows disk, an optional build lock, your own machine checks, recent PRs and live roles in one block.
 
@@ -25,7 +26,7 @@ Run the skill as `/agent-boss:orchestrator-handoff`, for example `/agent-boss:or
 ## Set up a project
 
 1. Create a handover dir: `sh <plugin>/skills/orchestrator-handoff/orch.sh init ~/code/my-project-handover`. Or ask Claude to run `orch init` for you after installing.
-2. Edit `agent-boss.conf` there (project name, your name, GitHub repo) and `orchestrator-lanes.tsv` (one row per lane). An optional build lock (`ORCH_LOCK`) and snapshot hook (`ORCH_SNAPSHOT_HOOK`) go in `~/.config/agent-boss/config`.
+2. Edit `agent-boss.conf` there (project name, your name, GitHub repo). Add lanes with `/agent-boss:define-role`, or edit `orchestrator-lanes.tsv` by hand (one row per lane; replace the sample frontend and backend rows). An optional build lock (`ORCH_LOCK`) and snapshot hook (`ORCH_SNAPSHOT_HOOK`) go in `~/.config/agent-boss/config`.
 3. Point sessions at the dir: `mkdir -p ~/.config/agent-boss && echo 'ORCH_DIR="$HOME/code/my-project-handover"' > ~/.config/agent-boss/config`. An `ORCH_DIR` environment variable overrides it.
 
 A snapshot hook is any script that prints status lines, for example:
