@@ -41,6 +41,8 @@ ssh -o ConnectTimeout=8 build-box 'echo "build-box: $(uptime | sed "s/.*averages
 
 - `orch.sh` reads `agent-boss.conf` and `~/.config/agent-boss/config` as plain `ORCH_NAME="value"` lines and never runs them as shell code.
 - `ORCH_LOCK` and `ORCH_SNAPSHOT_HOOK` name scripts that run, so they are accepted only from the environment or `~/.config/agent-boss/config`, never from a handover dir's own `agent-boss.conf`.
+- `ORCH_ORCHESTRATOR_DIR` (where an automatic successor starts) also comes only from the environment or `~/.config/agent-boss/config`.
+- Every Python step runs with `python3 -I`, so a `json.py` or similar planted in a session's working folder is never imported, including by the Stop hook that runs in every session.
 - `ORCH_LANE_PERMISSION_MODE` follows the same rule and must be `auto`, `default`, `acceptEdits` or `plan`; `bypassPermissions` is refused.
 - `start-lane` refuses an `ORCH_DIR` or script path containing a quote, backtick, `$` or backslash, because those paths go into the command line the new session runs.
 - Agents read the handover dir's handoffs, notes and settings as instructions, and lanes start in `auto` permission mode by default. Only use handover dirs you trust.

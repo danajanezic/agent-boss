@@ -66,10 +66,10 @@ _r=${ORCH_REPO:-}; _l=${ORCH_LOCK:-}; _h=${ORCH_SNAPSHOT_HOOK:-}; _p=${ORCH_PROJ
 _x=${ORCH_LANE_PROMPT_EXTRA:-}; _ha=${ORCH_HANDOFF_AT:-}; _om=${ORCH_ORCHESTRATOR_MODEL:-}; _m=${ORCH_LANE_PERMISSION_MODE:-}; _c=${ORCH_CTX:-}; _w=${ORCH_CTX_WARN_PCT:-}
 # Settings that run programs (lock, hook) come only from the environment or
 # ~/.config/agent-boss/config, never from the handover dir's own conf.
-# The lane permission mode is trusted-only too, so a handover dir can't raise it.
-_ul=${ORCH_LOCK:-}; _uh=${ORCH_SNAPSHOT_HOOK:-}; _um=${ORCH_LANE_PERMISSION_MODE:-}
+# The lane permission mode and the successor's start dir are trusted-only too, so a handover dir can't raise them.
+_ul=${ORCH_LOCK:-}; _uh=${ORCH_SNAPSHOT_HOOK:-}; _um=${ORCH_LANE_PERMISSION_MODE:-}; _ud=${ORCH_ORCHESTRATOR_DIR:-}
 load_conf "$DIR/agent-boss.conf"
-ORCH_LOCK=$_ul; ORCH_SNAPSHOT_HOOK=$_uh; ORCH_LANE_PERMISSION_MODE=$_um
+ORCH_LOCK=$_ul; ORCH_SNAPSHOT_HOOK=$_uh; ORCH_LANE_PERMISSION_MODE=$_um; ORCH_ORCHESTRATOR_DIR=$_ud
 REPO=${_r:-${ORCH_REPO:-}}                  # owner/name for gh PR lists; empty = skip
 LOCK=${_l:-${ORCH_LOCK:-}}                  # build-lock script with a `who` command; empty = skip
 HOOK=${_h:-${ORCH_SNAPSHOT_HOOK:-}}         # script whose stdout joins the snapshot (machine checks)
@@ -90,12 +90,12 @@ ROLES=$DIR/session-roles.json
 LANES=$DIR/orchestrator-lanes.tsv
 SELF=${CLAUDE_CODE_SESSION_ID:-}
 now() { date '+%Y-%m-%d %H:%M'; }
-age_min() { python3 -c 'import os,sys,time; print(int((time.time()-os.path.getmtime(sys.argv[1]))//60))' "$1"; }
+age_min() { python3 -I -c 'import os,sys,time; print(int((time.time()-os.path.getmtime(sys.argv[1]))//60))' "$1"; }
 abspath() { case "$1" in /*) echo "$1" ;; "~"*) echo "$HOME${1#\~}" ;; *) echo "$DIR/$1" ;; esac; }
 lane_field() { r=$(grep -v '^#' "$LANES" 2>/dev/null | awk -F'\t' -v n="$1" -v c="$2" '$1==n{print $c}'); [ -n "$r" ] && echo "$r"; }
 # ctx_tokens [transcript]: context size of the last assistant turn (input + cache read + cache write).
 ctx_tokens() {
-  python3 - "${1:-}" "$SELF" <<'PY'
+  python3 -I - "${1:-}" "$SELF" <<'PY'
 import glob, json, os, sys
 path, sid = sys.argv[1], sys.argv[2]
 if not path and sid:
@@ -127,7 +127,7 @@ startup_size() {
 }
 
 # py <action> <role> [arg]: all registry reads and writes, atomic, joined with live sessions
-py() { ROLES="$ROLES" SELF="$SELF" NOW="$(now)" python3 - "$@" <<'PY'
+py() { ROLES="$ROLES" SELF="$SELF" NOW="$(now)" python3 -I - "$@" <<'PY'
 import json, os, subprocess, sys
 act, role, arg = (sys.argv[1:] + ["", ""])[:3]
 path, me, now = os.environ["ROLES"], os.environ["SELF"], os.environ["NOW"]
@@ -184,7 +184,7 @@ snapshot)
   if [ -n "$REPO" ]; then
     echo "- Last merged: $(gh pr list -R "$REPO" --state merged --limit 5 --json number --jq '[.[].number|"#\(.)"]|join(", ")' 2>&1)"
     echo "- Open PRs updated in the last 24 h:"
-    since=$(python3 -c 'import datetime as d; print((d.datetime.now(d.timezone.utc)-d.timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M"))')
+    since=$(python3 -I -c 'import datetime as d; print((d.datetime.now(d.timezone.utc)-d.timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M"))')
     gh pr list -R "$REPO" --limit 50 --json number,isDraft,updatedAt,title --jq "[.[]|select(.updatedAt>\"$since\")]|.[]|\"  - #\(.number)\(if .isDraft then \" (draft)\" else \"\" end) \(.title[0:70])\"" 2>&1
   fi
   echo "- Roles:"; py roles | sed 's/^/  /' ;;
@@ -225,7 +225,7 @@ hook-stop)
   # keep it working with an instruction to hand off (once per session). Reads only local
   # files (no claude agents call), so it stays fast at the end of every turn.
   [ "$HANDOFF_AT" -gt 0 ] 2>/dev/null || exit 0
-  HANDOFF_AT=$HANDOFF_AT ROLES=$ROLES DIR=$DIR USERNAME=$USERNAME python3 -c '
+  HANDOFF_AT=$HANDOFF_AT ROLES=$ROLES DIR=$DIR USERNAME=$USERNAME python3 -I -c '
 import glob, json, os, sys, time
 try: d = json.load(sys.stdin)
 except Exception: sys.exit(0)
@@ -260,6 +260,7 @@ start-successor)
   case "$DIR$SELF_PATH" in *[\"\`\$\\]*) echo "refusing: ORCH_DIR or the script path contains a quote, backtick, \$ or backslash"; exit 2 ;; esac
   # Start where this orchestrator runs (already trusted); a background session can't answer a trust prompt.
   sdir=${ORCH_ORCHESTRATOR_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}; case "$sdir" in "~"*) sdir="$HOME${sdir#\~}" ;; esac
+  case "$sdir" in *[\"\`\$\\]*) echo "refusing: the start dir contains a quote, backtick, \$ or backslash"; exit 2 ;; esac
   cd "$sdir" || exit 1
   ORCH_DIR="$DIR" claude --bg -n orchestrator --model "$ORCH_MODEL" --permission-mode "$PERM" \
     "Take over as orchestrator for $PROJECT: follow the Take-over steps in $(dirname "$SELF_PATH")/SKILL.md (the orchestrator-handoff skill). The handover dir is $DIR (ORCH_DIR), and its script is: ORCH_DIR=\"$DIR\" sh \"$SELF_PATH\" . The previous orchestrator is session $SELF; it stays up as helper until you message it.$EXTRA" \

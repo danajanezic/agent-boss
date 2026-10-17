@@ -1,6 +1,6 @@
 {
   "name": "agent-boss",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Orchestrator and lane handoffs for multi-session Claude Code work: roles held by session ID, handoff checks, and fresh lane sessions.",
   "author": { "name": "danajanezic" },
   "license": "MIT",
