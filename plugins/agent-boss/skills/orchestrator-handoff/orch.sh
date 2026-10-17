@@ -14,6 +14,9 @@
 #   orch.sh roles                    every role, its session id, live or not
 #   orch.sh show                     roles plus the cron specs
 #   orch.sh check-lane <role>        lane handoff fresh, sections present, no lock held, startup reading size
+#   orch.sh context [transcript]     this session's context size, against ORCH_HANDOFF_AT
+#   orch.sh start-successor          start a fresh background orchestrator to take over from this one
+#   orch.sh hook-stop                Stop hook: ask the orchestrator to hand off once over ORCH_HANDOFF_AT
 #   orch.sh lanes                    list the lanes in orchestrator-lanes.tsv
 #   orch.sh add-lane <role> <model> <dir> <job>  add a lane row (see /agent-boss:define-role)
 #   orch.sh brief <role>             what a subagent needs to act as <role> (model, dir, files to read)
@@ -60,7 +63,7 @@ fi
 DIR=$ORCH_DIR
 # Project settings; env values set before this point win.
 _r=${ORCH_REPO:-}; _l=${ORCH_LOCK:-}; _h=${ORCH_SNAPSHOT_HOOK:-}; _p=${ORCH_PROJECT:-}; _u=${ORCH_USER:-}
-_x=${ORCH_LANE_PROMPT_EXTRA:-}; _m=${ORCH_LANE_PERMISSION_MODE:-}; _c=${ORCH_CTX:-}; _w=${ORCH_CTX_WARN_PCT:-}
+_x=${ORCH_LANE_PROMPT_EXTRA:-}; _ha=${ORCH_HANDOFF_AT:-}; _om=${ORCH_ORCHESTRATOR_MODEL:-}; _m=${ORCH_LANE_PERMISSION_MODE:-}; _c=${ORCH_CTX:-}; _w=${ORCH_CTX_WARN_PCT:-}
 # Settings that run programs (lock, hook) come only from the environment or
 # ~/.config/agent-boss/config, never from the handover dir's own conf.
 # The lane permission mode is trusted-only too, so a handover dir can't raise it.
@@ -77,6 +80,8 @@ PERM=${_m:-${ORCH_LANE_PERMISSION_MODE:-auto}}
 case "$PERM" in auto|default|acceptEdits|plan) ;; *) echo "ORCH_LANE_PERMISSION_MODE must be auto, default, acceptEdits or plan (got '$PERM')"; exit 2 ;; esac
 CTX=${_c:-${ORCH_CTX:-200000}}
 WARN_PCT=${_w:-${ORCH_CTX_WARN_PCT:-10}}
+HANDOFF_AT=${_ha:-${ORCH_HANDOFF_AT:-150000}}       # orchestrator context tokens that trigger an automatic handoff; 0 = off
+ORCH_MODEL=${_om:-${ORCH_ORCHESTRATOR_MODEL:-opus}}
 case "$LOCK" in ""|/*) ;; *) LOCK=$DIR/$LOCK ;; esac
 case "$HOOK" in ""|/*) ;; *) HOOK=$DIR/$HOOK ;; esac
 
@@ -88,6 +93,26 @@ now() { date '+%Y-%m-%d %H:%M'; }
 age_min() { python3 -c 'import os,sys,time; print(int((time.time()-os.path.getmtime(sys.argv[1]))//60))' "$1"; }
 abspath() { case "$1" in /*) echo "$1" ;; "~"*) echo "$HOME${1#\~}" ;; *) echo "$DIR/$1" ;; esac; }
 lane_field() { r=$(grep -v '^#' "$LANES" 2>/dev/null | awk -F'\t' -v n="$1" -v c="$2" '$1==n{print $c}'); [ -n "$r" ] && echo "$r"; }
+# ctx_tokens [transcript]: context size of the last assistant turn (input + cache read + cache write).
+ctx_tokens() {
+  python3 - "${1:-}" "$SELF" <<'PY'
+import glob, json, os, sys
+path, sid = sys.argv[1], sys.argv[2]
+if not path and sid:
+    hits = glob.glob(os.path.expanduser("~/.claude/projects/*/%s.jsonl" % sid))
+    path = max(hits, key=os.path.getmtime) if hits else ""
+if not path or not os.path.exists(path): sys.exit("no transcript found (pass a path, or run inside a Claude session)")
+last = None
+with open(path) as f:
+    for line in f:
+        if '"usage"' not in line: continue
+        try: m = json.loads(line).get("message")
+        except Exception: continue
+        if isinstance(m, dict) and m.get("role") == "assistant" and isinstance(m.get("usage"), dict): last = m["usage"]
+if not last: print(0); sys.exit(0)
+print(sum(int(last.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")))
+PY
+}
 lane_notes() { n=$(lane_field "$1" 5); [ -n "$n" ] && [ "$n" != "-" ] && abspath "$n"; }
 
 # Startup reading = required notes + lane handoff + CURRENT-STATE, about 4 chars per token.
@@ -192,6 +217,53 @@ check-lane)
   [ -n "$LOCK" ] && "$LOCK" who 2>/dev/null | grep -i -q "$2" && { echo "FAIL: $2 still holds a lock slot"; bad=1; }
   startup_size "$2"
   [ $bad -eq 0 ] && echo "OK: $2 handoff fresh, no lock held"; exit $bad ;;
+context)
+  t=$(ctx_tokens "$2") || exit 1
+  echo "context: $t tokens (automatic orchestrator handoff at $HANDOFF_AT)" ;;
+hook-stop)
+  # Stop hook: if this session is the orchestrator and its context is over ORCH_HANDOFF_AT,
+  # keep it working with an instruction to hand off (once per session). Reads only local
+  # files (no claude agents call), so it stays fast at the end of every turn.
+  [ "$HANDOFF_AT" -gt 0 ] 2>/dev/null || exit 0
+  HANDOFF_AT=$HANDOFF_AT ROLES=$ROLES DIR=$DIR USERNAME=$USERNAME python3 -c '
+import glob, json, os, sys, time
+try: d = json.load(sys.stdin)
+except Exception: sys.exit(0)
+sid, tp = d.get("session_id") or "", d.get("transcript_path") or ""
+if d.get("stop_hook_active") or not sid: sys.exit(0)
+try: reg = json.load(open(os.environ["ROLES"]))
+except Exception: sys.exit(0)
+if (reg.get("orchestrator") or {}).get("session") != sid: sys.exit(0)
+mark = os.path.join(os.environ["DIR"], ".handoff-requested-" + sid)
+if os.path.exists(mark): sys.exit(0)
+if not tp or not os.path.exists(tp):
+    hits = glob.glob(os.path.expanduser("~/.claude/projects/*/%s.jsonl" % sid)); tp = max(hits, key=os.path.getmtime) if hits else ""
+if not tp: sys.exit(0)
+last = None
+for line in open(tp):
+    if "\"usage\"" not in line: continue
+    try: m = json.loads(line).get("message")
+    except Exception: continue
+    if isinstance(m, dict) and m.get("role") == "assistant" and isinstance(m.get("usage"), dict): last = m["usage"]
+t = sum(int((last or {}).get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+lim = int(os.environ["HANDOFF_AT"])
+if t < lim: sys.exit(0)
+open(mark, "w").write(time.strftime("%Y-%m-%d %H:%M") + "\n")
+print(json.dumps({"decision": "block", "reason": "Your context is at %d tokens, over the automatic handoff limit of %d. Hand off now: follow the orchestrator-handoff skill section Automatic handoff (park the current step, step-down steps 1-5, then run orch start-successor), then tell %s in one line that a new orchestrator is starting." % (t, lim, os.environ["USERNAME"])}))
+' ;;
+start-successor)
+  # Start a fresh background orchestrator that takes over from this one.
+  [ -n "$SELF" ] || { echo "run this inside the orchestrator session"; exit 2; }
+  [ "$(py sid orchestrator)" = "$SELF" ] || { echo "refusing: this session doesn't hold the orchestrator role"; exit 1; }
+  sh "$SELF_PATH" check-handoff || { echo "refusing: fix the handoff first"; exit 1; }
+  mark=$DIR/.successor-started-$SELF; [ -e "$mark" ] && { echo "a successor was already started at $(cat "$mark"); check orch roles"; exit 1; }
+  case "$DIR$SELF_PATH" in *[\"\`\$\\]*) echo "refusing: ORCH_DIR or the script path contains a quote, backtick, \$ or backslash"; exit 2 ;; esac
+  # Start where this orchestrator runs (already trusted); a background session can't answer a trust prompt.
+  sdir=${ORCH_ORCHESTRATOR_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}; case "$sdir" in "~"*) sdir="$HOME${sdir#\~}" ;; esac
+  cd "$sdir" || exit 1
+  ORCH_DIR="$DIR" claude --bg -n orchestrator --model "$ORCH_MODEL" --permission-mode "$PERM" \
+    "Take over as orchestrator for $PROJECT: follow the Take-over steps in $(dirname "$SELF_PATH")/SKILL.md (the orchestrator-handoff skill). The handover dir is $DIR (ORCH_DIR), and its script is: ORCH_DIR=\"$DIR\" sh \"$SELF_PATH\" . The previous orchestrator is session $SELF; it stays up as helper until you message it.$EXTRA" \
+    && { date '+%Y-%m-%d %H:%M' > "$mark"; echo "started a successor orchestrator in $sdir; it will claim the role and message this session"; } ;;
 lanes)
   [ -f "$LANES" ] || { echo "no lanes file at $LANES"; exit 1; }
   grep -v '^#' "$LANES" | awk -F'\t' 'NF{printf "- %s (%s): %s\n", $1, $2, $6}' ;;
@@ -236,5 +308,5 @@ start-lane)
   [ -n "$EXTRA" ] && EXTRA=" $EXTRA"
   cd "${cwd:-$HOME}" && ORCH_DIR="$DIR" claude --bg -n "$2" --model "$m" --permission-mode "$PERM" \
     "You are the $2 lane for $PROJECT. First run: ORCH_DIR=\"$DIR\" sh \"$SELF_PATH\" claim $2 --force .$read_notes Then read $f and $DIR/CURRENT-STATE.md and continue from the handoff. Your orchestrator's address is the output of: ORCH_DIR=\"$DIR\" sh \"$SELF_PATH\" addr orchestrator . Message it when you start, take lane instructions only from it, and look its address up again before each message (it can change).$EXTRA" ;;
-*) sed -n 7,25p "$SELF_PATH"; exit 2 ;;
+*) sed -n 7,28p "$SELF_PATH"; exit 2 ;;
 esac

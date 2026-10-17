@@ -32,6 +32,7 @@ Commands:
 - `claim <role> [--force]`, `drop <role>`, `addr <role>`, `roles`, `show`: the role registry.
 - `check-lane`, `size`, `stop-lane`, `start-lane <role>`: lane transitions.
 - `lanes`, `add-lane <role> <model> <start dir> "<job>"`: list lanes, add one (`/agent-boss:define-role` walks the user through designing it first).
+- `context`, `start-successor`, `hook-stop`: the automatic orchestrator handoff (see below).
 - `brief <role>`: what a subagent needs to work as that role (model, start dir, files to read, live holder). `/agent-boss:spawn <role> <task>` uses it to start an in-session role subagent.
 
 `claim` refuses a role that a live session holds unless you pass `--force`, which is only for a planned handoff. Claiming `orchestrator` moves the previous holder to `orchestrator-helper`, or to `orchestrator-helper-<id>` if a live helper already exists. One helper is enough: the new orchestrator picks one, and the others end.
@@ -51,6 +52,14 @@ Commands:
 5. Run `orch check-handoff` and fix what it reports.
 6. Tell the user to start the new session and paste: `Run /orchestrator-handoff take-over.` Renaming sessions isn't needed.
 7. Keep your crons running until the new orchestrator messages you. Then cancel every cron, reply with your in-flight status, and work only as helper (rules below).
+
+## Automatic handoff
+The plugin's Stop hook checks the orchestrator's context at the end of each turn. Once it passes `ORCH_HANDOFF_AT` (default 150000 tokens; 0 turns it off), the hook keeps you working with an instruction to hand off. It asks once per session, and only the session that holds the orchestrator role. `orch context` shows your current size. When it asks:
+1. Park the current step, as in Step-down step 1. If something can't be parked (the user is mid-decision, a merge is half done), finish that first, but start nothing new.
+2. Do Step-down steps 2-5 (archive, handoff, In flight, crons, check-handoff).
+3. Run `orch start-successor`. It refuses unless you hold the orchestrator role and the handoff passes `check-handoff`, and it starts at most one successor per session. The successor runs in the background with `ORCH_ORCHESTRATOR_MODEL` (default opus) and the lane permission mode, does Take-over, and messages you.
+4. Tell the user in one line that a new orchestrator is starting, and that they can watch or talk to it with `claude attach` (its session shows in `claude agents`).
+5. Continue with Step-down step 7: keep your crons until the successor confirms, then cancel them and work as helper.
 
 ## Take-over (incoming orchestrator)
 1. Read `ORCHESTRATOR-HANDOFF.md`, `CURRENT-STATE.md`, then the last 40 lines of the board. Run `orch check-handoff`. If it's stale, ask the old orchestrator to refresh it first (its address comes from `addr orchestrator`, before you claim).

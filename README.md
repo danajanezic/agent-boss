@@ -6,10 +6,11 @@ A Claude Code plugin marketplace with tools for running a team of Claude Code se
 
 ### agent-boss
 
-Three skills: `orchestrator-handoff`, `spawn` and `define-role`. They cover:
+Three skills (`orchestrator-handoff`, `spawn`, `define-role`) and a Stop hook. They cover:
 - **Roles by session ID.** A registry maps each role to a session ID, so messages reach the right session even when names repeat or go stale. `orch.sh addr <role>` gives the SendMessage address.
 - **Orchestrator handoffs.** Step-down and take-over steps, a handoff template, and `check-handoff`, which fails when the handoff is stale or missing sections.
 - **Fresh lanes.** The old orchestrator, now the helper, parks each lane. The new one starts a replacement with `orch.sh start-lane <role>`, which reads the lane's notes and handoff.
+- **Automatic orchestrator handoff.** A Stop hook checks the orchestrator's context after each turn. Past `ORCH_HANDOFF_AT` (default 150000 tokens; 0 turns it off), it tells the orchestrator to write its handoff and run `orch.sh start-successor`, which launches a fresh background orchestrator (`ORCH_ORCHESTRATOR_MODEL`, default opus) that takes over and messages the old one. The check only reads local files and takes a few hundredths of a second; it never acts in sessions that don't hold the orchestrator role.
 - **Defining roles.** `/agent-boss:define-role [rough description]` interviews you one question at a time: what the role is for, what it owns and must never touch, what it delivers, which decisions stay with you, its model, start dir and standing rules. It shows a full draft, and only after you approve it writes the lanes row (`orch.sh add-lane`), the role's notes and a starter handoff.
 - **Role subagents.** `/agent-boss:spawn <role> <task>` starts a subagent inside your session that works as a lane role: it reads that role's notes, handoff and CURRENT-STATE first, then does the task and reports back. It doesn't claim the role in the registry. `orch.sh brief <role>` prints what it reads.
 - **Snapshots.** `orch.sh snapshot` shows disk, an optional build lock, your own machine checks, recent PRs and live roles in one block.
