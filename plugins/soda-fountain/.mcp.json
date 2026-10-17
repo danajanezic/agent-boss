@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "soda-fountain": {
+      "command": "npx",
+      "args": ["-y", "soda-fountain-mcp@2.0.1"],
+      "env": {
+        "SOCRATA_API_KEY": "${SOCRATA_API_KEY:-}"
+      }
+    }
+  }
+}

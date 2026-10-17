@@ -1,6 +1,8 @@
 {
   "name": "agent-boss",
-  "owner": { "name": "danajanezic" },
+  "owner": {
+    "name": "danajanezic"
+  },
   "metadata": {
     "description": "Tools for running a team of Claude Code sessions: an orchestrator, lanes, and clean handoffs between them."
   },
@@ -9,6 +11,11 @@
       "name": "agent-boss",
       "source": "./plugins/agent-boss",
       "description": "Orchestrator and lane handoffs for multi-session Claude Code work: roles held by session ID, handoff checks, and fresh lane sessions."
+    },
+    {
+      "name": "soda-fountain",
+      "source": "./plugins/soda-fountain",
+      "description": "Query US city, county and state open data on Socrata portals. Starts the soda-fountain MCP server and teaches Claude the discover, schema, SoQL workflow, cross-dataset keys and error handling."
     }
   ]
 }

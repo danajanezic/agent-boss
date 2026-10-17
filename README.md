@@ -15,6 +15,21 @@ Three skills (`orchestrator-handoff`, `spawn`, `define-role`) and a Stop hook. T
 - **Role subagents.** `/agent-boss:spawn <role> <task>` starts a subagent inside your session that works as a lane role: it reads that role's notes, handoff and CURRENT-STATE first, then does the task and reports back. It doesn't claim the role in the registry. `orch.sh brief <role>` prints what it reads.
 - **Snapshots.** `orch.sh snapshot` shows disk, an optional build lock, your own machine checks, recent PRs and live roles in one block.
 
+### soda-fountain
+
+A skill plus the `soda-fountain` MCP server (npm `soda-fountain-mcp`, pinned to 2.0.1) for questions about US city, county and state open data on Socrata portals. It covers:
+- **Query workflow.** Find a portal and dataset, read its columns, then run SoQL, with the pitfalls that trip up SQL habits.
+- **Cross-dataset keys.** `find_correlation_keys` shows which columns line up across datasets and portals.
+- **Errors and retired datasets.** What each error code means, and to search again when a dataset ID is dead.
+- **Optional app token.** Export `SOCRATA_API_KEY` for higher rate limits; it works without one.
+
+Install:
+
+```
+claude plugin marketplace add danajanezic/agent-boss
+claude plugin install soda-fountain@agent-boss
+```
+
 ## Install
 
 ```

@@ -1,0 +1,8 @@
+{
+  "name": "soda-fountain",
+  "version": "0.1.0",
+  "description": "Query US city, county and state open data on Socrata portals: starts the soda-fountain MCP server and teaches Claude the discover, schema, SoQL query workflow.",
+  "author": { "name": "danajanezic" },
+  "license": "MIT",
+  "keywords": ["socrata", "soql", "open-data", "mcp", "government-data"]
+}
