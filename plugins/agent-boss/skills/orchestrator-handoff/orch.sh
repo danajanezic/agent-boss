@@ -16,13 +16,15 @@
 #   orch.sh check-lane <role>        lane handoff fresh, sections present, no lock held, startup reading size
 #   orch.sh context [transcript]     this session's context size, against ORCH_HANDOFF_AT
 #   orch.sh start-successor          start a fresh background orchestrator to take over from this one
-#   orch.sh hook-stop                Stop hook: ask the orchestrator to hand off once over ORCH_HANDOFF_AT
+#   orch.sh hook-stop                Stop hook: ask any session over ORCH_HANDOFF_AT to hand off (wording per role)
 #   orch.sh lanes                    list the lanes in orchestrator-lanes.tsv
 #   orch.sh add-lane <role> <model> <dir> <job>  add a lane row (see /agent-boss:define-role)
 #   orch.sh brief <role>             what a subagent needs to act as <role> (model, dir, files to read)
-#   orch.sh size <role>              tokens a fresh lane must read at start (notes + handoff + CURRENT-STATE)
+#   orch.sh size <role>              tokens a fresh lane must read at start (notes + rules summary + handoff + state)
 #   orch.sh stop-lane <role>         stop the holder's background session (kept, resumable)
 #   orch.sh start-lane <role>        start a fresh background session that claims <role>
+#   orch.sh sweep [--dry]            stop defunct role-named sessions (lost their role, or idle helpers); resumable
+#   orch.sh msg <subcommand>         the role mailbox: send, check, reply, inbox, show, ack, log, stale, watch
 #
 # Settings: ORCH_DIR (the handover dir) comes from the environment, else from
 # ~/.config/agent-boss/config. Project settings live in $ORCH_DIR/agent-boss.conf
@@ -48,8 +50,9 @@ load_conf "$HOME/.config/agent-boss/config"
 if [ "$1" = "init" ]; then
   d=${2:-${ORCH_DIR:-}}
   [ -n "$d" ] || { echo "usage: orch.sh init <dir>   (or set ORCH_DIR)"; exit 2; }
-  mkdir -p "$d/lane-handoffs" "$d/lane-notes" || exit 1
-  for f in agent-boss.conf orchestrator-lanes.tsv orchestrator-crons.md CURRENT-STATE.md ORCHESTRATOR.md; do
+  mkdir -p "$d/lane-handoffs" "$d/lane-notes" "$d/adhoc-handoffs" "$d/mq" || exit 1
+  for f in agent-boss.conf orchestrator-lanes.tsv orchestrator-crons.md CURRENT-STATE.md ORCHESTRATOR.md \
+           STANDING-RULES.md STANDING-RULES-SUMMARY.md; do
     [ -e "$d/$f" ] && echo "kept $d/$f" || { cp "$TEMPLATES/$f" "$d/$f" && echo "created $d/$f"; }
   done
   [ -e "$d/session-roles.json" ] || echo "{}" > "$d/session-roles.json"
@@ -64,12 +67,13 @@ DIR=$ORCH_DIR
 # Project settings; env values set before this point win.
 _r=${ORCH_REPO:-}; _l=${ORCH_LOCK:-}; _h=${ORCH_SNAPSHOT_HOOK:-}; _p=${ORCH_PROJECT:-}; _u=${ORCH_USER:-}
 _x=${ORCH_LANE_PROMPT_EXTRA:-}; _ha=${ORCH_HANDOFF_AT:-}; _om=${ORCH_ORCHESTRATOR_MODEL:-}; _m=${ORCH_LANE_PERMISSION_MODE:-}; _c=${ORCH_CTX:-}; _w=${ORCH_CTX_WARN_PCT:-}
-# Settings that run programs (lock, hook) come only from the environment or
+_h2=${ORCH_HANDOFF_AGAIN_AT:-}; _hd=${ORCH_HANDOFF_ADHOC:-}; _sm=${ORCH_SWEEP_MIN:-}; _se=${ORCH_SWEEP_EVERY:-}
+# Settings that run programs (lock, snapshot hook, notify hook) come only from the environment or
 # ~/.config/agent-boss/config, never from the handover dir's own conf.
 # The lane permission mode and the successor's start dir are trusted-only too, so a handover dir can't raise them.
-_ul=${ORCH_LOCK:-}; _uh=${ORCH_SNAPSHOT_HOOK:-}; _um=${ORCH_LANE_PERMISSION_MODE:-}; _ud=${ORCH_ORCHESTRATOR_DIR:-}
+_ul=${ORCH_LOCK:-}; _uh=${ORCH_SNAPSHOT_HOOK:-}; _um=${ORCH_LANE_PERMISSION_MODE:-}; _ud=${ORCH_ORCHESTRATOR_DIR:-}; _un=${ORCH_NOTIFY:-}
 load_conf "$DIR/agent-boss.conf"
-ORCH_LOCK=$_ul; ORCH_SNAPSHOT_HOOK=$_uh; ORCH_LANE_PERMISSION_MODE=$_um; ORCH_ORCHESTRATOR_DIR=$_ud
+ORCH_LOCK=$_ul; ORCH_SNAPSHOT_HOOK=$_uh; ORCH_LANE_PERMISSION_MODE=$_um; ORCH_ORCHESTRATOR_DIR=$_ud; ORCH_NOTIFY=$_un
 REPO=${_r:-${ORCH_REPO:-}}                  # owner/name for gh PR lists; empty = skip
 LOCK=${_l:-${ORCH_LOCK:-}}                  # build-lock script with a `who` command; empty = skip
 HOOK=${_h:-${ORCH_SNAPSHOT_HOOK:-}}         # script whose stdout joins the snapshot (machine checks)
@@ -80,10 +84,19 @@ PERM=${_m:-${ORCH_LANE_PERMISSION_MODE:-auto}}
 case "$PERM" in auto|default|acceptEdits|plan) ;; *) echo "ORCH_LANE_PERMISSION_MODE must be auto, default, acceptEdits or plan (got '$PERM')"; exit 2 ;; esac
 CTX=${_c:-${ORCH_CTX:-200000}}
 WARN_PCT=${_w:-${ORCH_CTX_WARN_PCT:-10}}
-HANDOFF_AT=${_ha:-${ORCH_HANDOFF_AT:-150000}}       # orchestrator context tokens that trigger an automatic handoff; 0 = off
+# Context tokens that trigger the automatic handoff notices, in any session. 250000 rather than
+# 150000 because a fresh session spends a good part of a 150k budget on its startup reading before
+# it does any work, so lanes were handing off almost as soon as they started. 0 turns a notice off.
+HANDOFF_AT=${_ha:-${ORCH_HANDOFF_AT:-250000}}
+HANDOFF_AGAIN_AT=${_h2:-${ORCH_HANDOFF_AGAIN_AT:-350000}}   # second notice, plus the ORCH_NOTIFY alert; 0 = off
+HANDOFF_ADHOC=${_hd:-${ORCH_HANDOFF_ADHOC:-1}}      # 0 = no notice for sessions that hold no role
+SWEEP_MIN=${_sm:-${ORCH_SWEEP_MIN:-30}}             # minutes quiet before sweep stops a defunct session
+SWEEP_EVERY=${_se:-${ORCH_SWEEP_EVERY:-15}}         # minutes between automatic sweeps; 0 = manual only
+NOTIFY=${ORCH_NOTIFY:-}                             # script that gets {"message","cwd"} JSON for a second notice
 ORCH_MODEL=${_om:-${ORCH_ORCHESTRATOR_MODEL:-opus}}
 case "$LOCK" in ""|/*) ;; *) LOCK=$DIR/$LOCK ;; esac
 case "$HOOK" in ""|/*) ;; *) HOOK=$DIR/$HOOK ;; esac
+case "$NOTIFY" in ""|/*) ;; *) NOTIFY=$DIR/$NOTIFY ;; esac
 
 H=$DIR/ORCHESTRATOR-HANDOFF.md
 ROLES=$DIR/session-roles.json
@@ -115,11 +128,14 @@ PY
 }
 lane_notes() { n=$(lane_field "$1" 5); [ -n "$n" ] && [ "$n" != "-" ] && abspath "$n"; }
 
-# Startup reading = required notes + lane handoff + CURRENT-STATE, about 4 chars per token.
+# Startup reading = required notes + the standing-rules summary + lane handoff + CURRENT-STATE,
+# about 4 chars per token. The full STANDING-RULES.md is not counted: a lane greps one rule out of
+# it when a summary line touches its work, rather than reading it at startup.
 startup_size() {
   n=$(lane_notes "$1"); f=$(abspath "$(lane_field "$1" 3)"); b=0
   [ -n "$n" ] && [ -d "$n" ] && b=$(cat "$n"/*.md 2>/dev/null | wc -c)
   [ -f "$f" ] && b=$((b + $(wc -c < "$f")))
+  [ -f "$DIR/STANDING-RULES-SUMMARY.md" ] && b=$((b + $(wc -c < "$DIR/STANDING-RULES-SUMMARY.md")))
   [ -f "$DIR/CURRENT-STATE.md" ] && b=$((b + $(wc -c < "$DIR/CURRENT-STATE.md")))
   t=$((b / 4)); pct=$((t * 100 / CTX))
   msg="$1 startup reading: about $t tokens ($pct% of $CTX)"
@@ -127,7 +143,7 @@ startup_size() {
 }
 
 # py <action> <role> [arg]: all registry reads and writes, atomic, joined with live sessions
-py() { ROLES="$ROLES" SELF="$SELF" NOW="$(now)" python3 -I - "$@" <<'PY'
+py() { ROLES="$ROLES" SELF="$SELF" NOW="$(now)" SWEEP_MIN="$SWEEP_MIN" python3 -I - "$@" <<'PY'
 import json, os, subprocess, sys
 act, role, arg = (sys.argv[1:] + ["", ""])[:3]
 path, me, now = os.environ["ROLES"], os.environ["SELF"], os.environ["NOW"]
@@ -152,6 +168,12 @@ if act == "claim":
         if key != "orchestrator-helper": print("note: a live helper already exists; old orchestrator saved as " + key)
     reg[role] = {"session": me, "since": now}; save()
     print("%s -> %s (%s)" % (role, me, addr(me) or "not visible in claude agents yet"))
+    if role == "orchestrator" and (live.get(me, {}).get("name") or "orchestrator") != "*orchestrator":
+        # A live session can't be renamed, so the star is set when the session is launched
+        # (start-successor does it). Say so, rather than leave two unstarred orchestrators.
+        print("note: this session is named '%s', not '*orchestrator'. The active orchestrator should be the "
+              "starred one in `claude agents`; sessions started by start-successor are named that way."
+              % (live.get(me, {}).get("name") or "unnamed"))
 elif act == "drop":
     if holder(role) != me and arg != "--force": sys.exit("%s is not held by this session" % role)
     reg.pop(role, None); save(); print("dropped", role)
@@ -166,6 +188,34 @@ elif act == "sid":
 elif act == "bgid":
     sid = holder(role); x = live.get(sid or "", {})
     print(x.get("id", "") if x.get("kind") == "background" and x.get("pid") else "")
+elif act == "defunct":
+    # Background sessions this script started (they are named after a role) that no longer hold a
+    # role, plus orchestrator-helpers that have gone idle. arg = the lane role names, comma-separated.
+    import glob, time
+    base = set(x for x in arg.split(",") if x) | {"orchestrator"}
+    names = base | {"*" + n for n in base}   # the active orchestrator runs as *orchestrator
+    mins = int(os.environ.get("SWEEP_MIN") or 30)
+    owner = {v.get("session"): r for r, v in reg.items() if isinstance(v, dict)}
+    for sid, x in live.items():
+        if x.get("kind") != "background" or not x.get("pid") or not x.get("id") or x.get("name") not in names: continue
+        r = owner.get(sid, "")
+        if r and not r.startswith("orchestrator-helper"): continue
+        tf = sorted(glob.glob(os.path.expanduser("~/.claude/projects/*/%s.jsonl" % sid)), key=os.path.getmtime)
+        if tf:
+            quiet = int((time.time() - os.path.getmtime(tf[-1])) / 60)
+        else:
+            # No transcript yet, so this is a session that just started: fall back to process age,
+            # or a lane would be swept in the seconds before its first command claims its role.
+            et = subprocess.run(["ps", "-o", "etime=", "-p", str(x["pid"])], capture_output=True, text=True).stdout.strip()
+            dd, _, hms = et.rpartition("-"); p = [int(v) for v in hms.split(":")] if hms else [0]
+            while len(p) < 3: p.insert(0, 0)
+            quiet = (int(dd or 0) * 1440) + p[0] * 60 + p[1]
+        idle = x.get("status") == "idle"
+        # A roleless session goes once it is idle or stuck; a helper only after it has been quiet a
+        # while, because a helper legitimately waits on lanes. The 5-minute floor protects a session
+        # that has started but not yet claimed its role.
+        if (not r and quiet >= 5 and (idle or quiet >= mins)) or (r and idle and quiet >= mins):
+            print("%s %s %s %s %d" % (x["id"], sid, x.get("name"), r or "-", quiet))
 elif act == "roles":
     if not reg: print("- (no roles claimed yet)")
     for r, v in sorted(reg.items()):
@@ -219,38 +269,29 @@ check-lane)
   [ $bad -eq 0 ] && echo "OK: $2 handoff fresh, no lock held"; exit $bad ;;
 context)
   t=$(ctx_tokens "$2") || exit 1
-  echo "context: $t tokens (automatic orchestrator handoff at $HANDOFF_AT)" ;;
+  echo "context: $t tokens (automatic handoff notices at $HANDOFF_AT and $HANDOFF_AGAIN_AT)" ;;
 hook-stop)
-  # Stop hook: if this session is the orchestrator and its context is over ORCH_HANDOFF_AT,
-  # keep it working with an instruction to hand off (once per session). Reads only local
-  # files (no claude agents call), so it stays fast at the end of every turn.
+  # Stop hook, running at the end of every turn in every session with this plugin enabled.
+  # Past ORCH_HANDOFF_AT it keeps the session working with an instruction to hand off, worded for
+  # the role the session holds (orchestrator, a lane, or no role at all); past ORCH_HANDOFF_AGAIN_AT
+  # it asks a second time and runs ORCH_NOTIFY. hook-stop.py has the rules. It reads only local
+  # files, so it stays fast, and it prints nothing unless a notice is due.
   [ "$HANDOFF_AT" -gt 0 ] 2>/dev/null || exit 0
-  HANDOFF_AT=$HANDOFF_AT ROLES=$ROLES DIR=$DIR USERNAME=$USERNAME python3 -I -c '
-import glob, json, os, sys, time
-try: d = json.load(sys.stdin)
-except Exception: sys.exit(0)
-sid, tp = d.get("session_id") or "", d.get("transcript_path") or ""
-if d.get("stop_hook_active") or not sid: sys.exit(0)
-try: reg = json.load(open(os.environ["ROLES"]))
-except Exception: sys.exit(0)
-if (reg.get("orchestrator") or {}).get("session") != sid: sys.exit(0)
-mark = os.path.join(os.environ["DIR"], ".handoff-requested-" + sid)
-if os.path.exists(mark): sys.exit(0)
-if not tp or not os.path.exists(tp):
-    hits = glob.glob(os.path.expanduser("~/.claude/projects/*/%s.jsonl" % sid)); tp = max(hits, key=os.path.getmtime) if hits else ""
-if not tp: sys.exit(0)
-last = None
-for line in open(tp):
-    if "\"usage\"" not in line: continue
-    try: m = json.loads(line).get("message")
-    except Exception: continue
-    if isinstance(m, dict) and m.get("role") == "assistant" and isinstance(m.get("usage"), dict): last = m["usage"]
-t = sum(int((last or {}).get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
-lim = int(os.environ["HANDOFF_AT"])
-if t < lim: sys.exit(0)
-open(mark, "w").write(time.strftime("%Y-%m-%d %H:%M") + "\n")
-print(json.dumps({"decision": "block", "reason": "Your context is at %d tokens, over the automatic handoff limit of %d. Hand off now: follow the orchestrator-handoff skill section Automatic handoff (park the current step, step-down steps 1-5, then run orch start-successor), then tell %s in one line that a new orchestrator is starting." % (t, lim, os.environ["USERNAME"])}))
-' ;;
+  d=$(cat)   # the hook JSON, needed twice: once for the notice, once for the automatic sweep
+  printf '%s' "$d" | HANDOFF_AT=$HANDOFF_AT HANDOFF_AGAIN_AT=$HANDOFF_AGAIN_AT HANDOFF_ADHOC=$HANDOFF_ADHOC \
+    DIR=$DIR ROLES=$ROLES LANES=$LANES SELF_PATH=$SELF_PATH USERNAME=$USERNAME ORCH_NOTIFY=$NOTIFY \
+    python3 -I "$(dirname "$SELF_PATH")/hook-stop.py"
+  # Automatic sweep: the orchestrator's own turns drive it, so no cron is needed. `sweep --auto` does
+  # nothing unless ORCH_SWEEP_EVERY minutes have passed, and it runs detached with its output in the
+  # log, so a slow `claude agents` call can never hold up the turn that triggered it.
+  if [ "$SWEEP_EVERY" -gt 0 ] 2>/dev/null; then
+    sid=$(printf '%s' "$d" | python3 -I -c 'import json,sys
+try: print(json.load(sys.stdin).get("session_id") or "")
+except Exception: pass')
+    [ -n "$sid" ] && [ "$sid" = "$(py sid orchestrator)" ] &&
+      (ORCH_DIR="$DIR" sh "$SELF_PATH" sweep --auto >> "$DIR/sweep.log" 2>&1 &) 2>/dev/null
+  fi
+  exit 0 ;;
 start-successor)
   # Start a fresh background orchestrator that takes over from this one.
   [ -n "$SELF" ] || { echo "run this inside the orchestrator session"; exit 2; }
@@ -262,7 +303,9 @@ start-successor)
   sdir=${ORCH_ORCHESTRATOR_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}; case "$sdir" in "~"*) sdir="$HOME${sdir#\~}" ;; esac
   case "$sdir" in *[\"\`\$\\]*) echo "refusing: the start dir contains a quote, backtick, \$ or backslash"; exit 2 ;; esac
   cd "$sdir" || exit 1
-  ORCH_DIR="$DIR" claude --bg -n orchestrator --model "$ORCH_MODEL" --permission-mode "$PERM" \
+  # Named *orchestrator: the star marks the active one in `claude agents`, since a live session
+  # can't be renamed and the session stepping down keeps whatever name it was started with.
+  ORCH_DIR="$DIR" claude --bg -n '*orchestrator' --model "$ORCH_MODEL" --permission-mode "$PERM" \
     "Take over as orchestrator for $PROJECT: follow the Take-over steps in $(dirname "$SELF_PATH")/SKILL.md (the orchestrator-handoff skill). The handover dir is $DIR (ORCH_DIR), and its script is: ORCH_DIR=\"$DIR\" sh \"$SELF_PATH\" . The previous orchestrator is session $SELF; it stays up as helper until you message it.$EXTRA" \
     && { date '+%Y-%m-%d %H:%M' > "$mark"; echo "started a successor orchestrator in $sdir; it will claim the role and message this session"; } ;;
 lanes)
@@ -289,13 +332,46 @@ brief)
   echo "role: $2"; echo "project: $PROJECT"; echo "user: $USERNAME"; echo "model: $m"
   echo "start dir: ${cwd:-$HOME}"; echo "job: $(lane_field "$2" 6)"
   echo "read first:"
-  if [ -n "$n" ] && [ -d "$n" ]; then [ -f "$n/MEMORY.md" ] && echo "  $n/MEMORY.md"; for x in "$n"/*.md; do [ "$x" = "$n/MEMORY.md" ] || { [ -f "$x" ] && echo "  $x"; }; done; fi
-  [ -f "$f" ] && echo "  $f" || echo "  (no handoff yet at $f)"
+  if [ -n "$n" ] && [ -d "$n" ]; then [ -f "$n/MEMORY.md" ] && echo "  $n/MEMORY.md (the index; open a note when its line applies)"; for x in "$n"/*.md; do [ "$x" = "$n/MEMORY.md" ] || { [ -f "$x" ] && echo "  $x"; }; done; fi
+  [ -f "$DIR/STANDING-RULES-SUMMARY.md" ] && echo "  $DIR/STANDING-RULES-SUMMARY.md (grep a line's bold title in STANDING-RULES.md before acting on it)"
   [ -f "$DIR/CURRENT-STATE.md" ] && echo "  $DIR/CURRENT-STATE.md"
+  [ -f "$f" ] && echo "  $f" || echo "  (no handoff yet at $f)"
+  echo "mailbox: $(basename "$SELF_PATH") msg check $2   (send with: msg send orchestrator \"...\")"
   [ -n "$EXTRA" ] && echo "house rules: $EXTRA"
   a=$(py addr "$2" 2>/dev/null) && echo "live holder: $a (a lane session already holds $2; warn the user before overlapping its work)" || echo "live holder: none"
   startup_size "$2" ;;
 size) lane_field "$2" 3 >/dev/null || { echo "unknown lane $2 (see $LANES)"; exit 2; }; startup_size "$2" ;;
+sweep)
+  # Stop background sessions this script started that are now defunct: ones that lost their role and
+  # went idle or stuck, and orchestrator-helpers idle SWEEP_MIN minutes. Only sessions named after a
+  # role are ever touched, never the user's own, and never one holding a lock slot. Conversations are
+  # kept, so any of them can come back with `claude --bg --resume <session>`.
+  #   --dry    print what it would stop
+  #   --auto   do nothing unless ORCH_SWEEP_EVERY minutes have passed since the last automatic run
+  if [ "$2" = "--auto" ]; then
+    stamp=$DIR/.sweep-last
+    [ "$SWEEP_EVERY" -gt 0 ] 2>/dev/null || exit 0
+    [ -f "$stamp" ] && [ "$(age_min "$stamp")" -lt "$SWEEP_EVERY" ] && exit 0
+    now > "$stamp"
+  fi
+  py defunct x "$(grep -v '^#' "$LANES" 2>/dev/null | cut -f1 | paste -sd, -)" | while read -r id sid name role quiet; do
+    if [ -n "$LOCK" ] && "$LOCK" who 2>/dev/null | grep -q -- "$sid"; then
+      echo "skip $name $id: holds a lock slot"; continue
+    fi
+    [ "$2" = "--dry" ] && { echo "would stop $name $id (role ${role}, quiet ${quiet} min)"; continue; }
+    claude stop "$id" >/dev/null 2>&1 || continue
+    [ "$role" != "-" ] && py drop "$role" --force >/dev/null 2>&1
+    echo "$(now) stopped defunct $name session $id (role ${role}, quiet ${quiet} min; resume: claude --bg --resume $sid)"
+  done ;;
+msg)
+  # The role mailbox: messages addressed to a role wait for whichever session holds it, so nothing
+  # is lost while a lane is parked, offline or being swapped. See msg.py for the subcommands.
+  shift
+  # The user is a valid sender too, so a script can pass on something they said, but only once
+  # they have a name in the config: "the user" is the placeholder, not a role.
+  extra="script,all"; [ "$USERNAME" != "the user" ] && extra="$extra,$USERNAME"
+  MSG_DB=${ORCH_MSG_DB:-$DIR/mq/messages.sqlite} MSG_ROLES_FILE=$ROLES MSG_EXTRA_ROLES="$extra" \
+    exec python3 -I "$(dirname "$SELF_PATH")/msg.py" "$@" ;;
 stop-lane)
   id=$(py bgid "$2"); [ -n "$id" ] || { echo "the $2 holder is not a live background session (interactive ones: ask $USERNAME to close it)"; exit 1; }
   claude stop "$id" && echo "stopped $2 (session $(py sid "$2")); resume with: claude --bg --resume $(py sid "$2")" ;;
@@ -305,9 +381,14 @@ start-lane)
   case "$cwd" in "~"*) cwd="$HOME${cwd#\~}" ;; esac
   py addr "$2" >/dev/null 2>&1 && { echo "$2 is held by a live session ($(py addr "$2")); stop it first"; exit 1; }
   case "$DIR$SELF_PATH" in *[\"\`\$\\]*) echo "refusing: ORCH_DIR or the script path contains a quote, backtick, \$ or backslash"; exit 2 ;; esac
-  read_notes=""; [ -n "$notes" ] && read_notes=" Before any work, read every note in $notes (MEMORY.md first): they are this lane's standing rules from $USERNAME."
+  # Startup reading, in this order: the lane's own notes index, the standing-rules summary, today's
+  # state, then its handoff. Each is an index that points at longer text, so a fresh lane starts
+  # knowing the rules without having read them all.
+  read_notes=""; [ -n "$notes" ] && read_notes=" Before any work, read $notes/MEMORY.md: one line per standing rule from $USERNAME for this lane. Open a note in $notes whenever its line touches the step you are about to take, and always before a step it names (they are rules, not background)."
+  read_rules=""; [ -f "$DIR/STANDING-RULES-SUMMARY.md" ] && read_rules=" Then read $DIR/STANDING-RULES-SUMMARY.md (one line per standing rule and per settled decision; before acting on a line that touches your work, grep its bold title in $DIR/STANDING-RULES.md and read the full rule)."
+  orch="ORCH_DIR=\"$DIR\" sh \"$SELF_PATH\""
   [ -n "$EXTRA" ] && EXTRA=" $EXTRA"
   cd "${cwd:-$HOME}" && ORCH_DIR="$DIR" claude --bg -n "$2" --model "$m" --permission-mode "$PERM" \
-    "You are the $2 lane for $PROJECT. First run: ORCH_DIR=\"$DIR\" sh \"$SELF_PATH\" claim $2 --force .$read_notes Then read $f and $DIR/CURRENT-STATE.md and continue from the handoff. Your orchestrator's address is the output of: ORCH_DIR=\"$DIR\" sh \"$SELF_PATH\" addr orchestrator . Message it when you start, take lane instructions only from it, and look its address up again before each message (it can change).$EXTRA" ;;
-*) sed -n 7,28p "$SELF_PATH"; exit 2 ;;
+    "You are the $2 lane for $PROJECT. First run: $orch claim $2 --force .$read_notes$read_rules Then read $DIR/CURRENT-STATE.md (today only), then $f, and continue from the handoff. Your mailbox: run $orch msg check $2 now, then create a recurring CronCreate job (cron \"*/5 * * * *\") with prompt \"Run $orch msg check $2. If it prints nothing, stop with no reply. Otherwise act on each message and reply with $orch msg reply <id> 'text'.\" Crons die with the session and expire after 7 days, so recreate it if it goes missing, or your messages pile up undelivered. Send reports with: $orch msg send orchestrator \"...\" . Message the orchestrator when you start, and take lane instructions only from it. If msg ever fails, fall back to SendMessage to the address from: $orch addr orchestrator (look it up again before each message, because it changes when a session restarts).$EXTRA" ;;
+*) sed -n 7,30p "$SELF_PATH"; exit 2 ;;
 esac
