@@ -19,12 +19,38 @@ The notice depends on the session's role in session-roles.json:
 This runs at the end of every turn in every session with the plugin enabled, so it only reads
 local files: the registry, the lanes file, and the tail of this session's transcript.
 """
-import glob, json, os, subprocess, sys, time
+import glob, json, os, re, subprocess, sys, time
 
 env = os.environ
 first_at, again_at = int(env.get("HANDOFF_AT") or 0), int(env.get("HANDOFF_AGAIN_AT") or 0)
 DIR, ROLES, ORCH = env["DIR"], env["ROLES"], env["SELF_PATH"]
-USER, ADHOC, NOTIFY = env.get("USERNAME") or "the user", env.get("HANDOFF_ADHOC", "1") != "0", env.get("ORCH_NOTIFY") or ""
+ADHOC, NOTIFY = env.get("HANDOFF_ADHOC", "1") != "0", env.get("ORCH_NOTIFY") or ""
+
+
+def a_name(s, fallback):
+    """A name, not a sentence. This hook runs in EVERY session on the machine, including ones in
+    projects that have nothing to do with this handover dir, and whatever it returns is printed
+    into that session's context as an instruction. ORCH_USER and the role names come from files in
+    the handover dir, so clamp them to something that cannot carry instructions of its own."""
+    s = re.sub(r"[^A-Za-z0-9 ._'-]", " ", (s or "").strip())
+    s = " ".join(s.split()[:3])[:24].strip()   # a name is a few short words, not a sentence
+    return s or fallback
+
+
+def in_dir(path, fallback):
+    """A path under DIR, or the fallback. Keeps a handoff path out of ~/.ssh and the like, whether
+    the lanes file holds an absolute path, a '..' or a symlinked route out."""
+    try:
+        base = os.path.realpath(DIR)
+        full = os.path.realpath(os.path.join(DIR, path))
+        if full == base or full.startswith(base + os.sep):
+            return full
+    except Exception:
+        pass
+    return fallback
+
+
+USER = a_name(env.get("USERNAME"), "the user")
 TAIL = 1 << 19  # the last usage line is always within the final 512 KB, so big transcripts stay cheap to read
 
 try:
@@ -69,6 +95,10 @@ lanes = [r for r in held if not r.startswith("orchestrator-helper")]
 if held and not lanes:
     sys.exit(0)  # a helper is winding down; leave it alone
 role = "orchestrator" if "orchestrator" in held else lanes[0] if lanes else None
+if role is not None:
+    role = a_name(role, "")  # the registry is a file; a role is a label, not a path or a sentence
+    if not role:
+        sys.exit(0)
 if role is None and not ADHOC:
     sys.exit(0)
 
@@ -100,11 +130,11 @@ if role == "orchestrator":
             "is starting." % (ORCH, USER))
 elif role:
     path = os.path.join(DIR, "lane-handoffs", role + ".md")
-    try:  # the lanes file names each lane's handoff in column 3
+    try:  # the lanes file names each lane's handoff in column 3; it must stay inside DIR
         for row in open(env.get("LANES") or os.devnull):
             c = row.rstrip("\n").split("\t")
             if not row.startswith("#") and len(c) > 2 and c[0] == role and c[2].strip():
-                path = os.path.join(DIR, c[2].strip())
+                path = in_dir(c[2].strip(), path)
     except Exception:
         pass
     body = ("Ask your orchestrator for a fresh %s session. (1) Finish or park your current step and start nothing new. "
@@ -115,7 +145,8 @@ elif role:
             "orchestrator stops this session with stop-lane and starts a fresh one with start-lane. Do not stop "
             "yourself." % (role, path, role, ORCH))
 else:
-    path = os.path.join(DIR, "adhoc-handoffs", "%s-%s.md" % (time.strftime("%Y-%m-%d"), sid[:8]))
+    tag = re.sub(r"[^A-Za-z0-9-]", "", sid)[:8] or "session"
+    path = os.path.join(DIR, "adhoc-handoffs", "%s-%s.md" % (time.strftime("%Y-%m-%d"), tag))
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
     except Exception:
