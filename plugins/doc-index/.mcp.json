@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "doc-index": {
+      "type": "stdio",
+      "command": "python3",
+      "args": ["-I", "${CLAUDE_PLUGIN_ROOT}/server/index_server.py"],
+      "env": {
+        "DOC_INDEX_DB": "${DOC_INDEX_DB:-${CLAUDE_PROJECT_DIR}/.doc-index/index.sqlite}"
+      }
+    }
+  }
+}

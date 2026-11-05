@@ -18,6 +18,23 @@ Three skills (`orchestrator-handoff`, `spawn`, `define-role`) and a Stop hook. T
 - **Role subagents.** `/agent-boss:spawn <role> <task>` starts a subagent inside your session that works as a lane role: it reads that role's notes, handoff and CURRENT-STATE first, then does the task and reports back. It doesn't claim the role in the registry. `orch.sh brief <role>` prints what it reads.
 - **Snapshots.** `orch.sh snapshot` shows disk, an optional build lock, your own machine checks, recent PRs and live roles in one block.
 
+### doc-index
+
+Makes a project's own writing reachable by a session that cannot afford to read it. Three parts, usable separately:
+
+- **A one-line-per-document index.** `docidx add <file> "<hook>"` keeps `docs/INDEX.md`, where each line says *when* to open a document rather than what it contains. `docidx check` catches lines pointing at nothing, documents with no line, missing hooks and titles that have drifted from their heading, and exits non-zero, so it belongs in CI. `docidx size` says what a session spends reading the index and warns when it stops being cheaper than the documents.
+- **A searchable index, served over MCP.** `docidx refresh` builds a sqlite FTS5 index over your documents, handover notes and, with `--github owner/repo`, issues and pull request comments, extracting every line that marks itself as a decision. The `doc-index` server then answers with cited passages: `search`, `current_decision` (the latest ruling on a topic, with what it supersedes), `conflicts`, `doc_context` and `index_status`. Answers are capped at three passages and name what they left out, because an index that returns everything spends a session's context without telling it more. Refresh is incremental and needs no dependencies beyond python3.
+- **An agent that keeps both true.** `doc-maintainer` records a decision into the document that owns it (superseding rather than deleting), and runs the drift sweep: it fixes what is mechanical, such as a moved path or a dead index line, and reports what would mean deciding something, such as two live rules that contradict each other.
+
+Because `current_decision` is a thing sessions trust, it is careful about who gets to decide: from GitHub, only an issue or PR body written by an owner, member or collaborator becomes a decision, attributed to the login the API reports rather than any name typed in the text, and comments are indexed for search but never become decisions. Future-dated lines are treated as undated, so one cannot outrank a real decision. The indexer also skips symlinks and anything resolving outside its roots, so a link dropped in a docs directory cannot copy a private key into a searchable database.
+
+`docidx schedule --every 30` keeps the searchable index fresh with a launchd agent on macOS, or prints the crontab line elsewhere. This matters more than it sounds: a stale index answers confidently from last week, and that failure is indistinguishable from a correct answer, which is why every response carries `last_refresh`.
+
+```
+claude plugin marketplace add danajanezic/agent-boss
+claude plugin install doc-index@agent-boss
+```
+
 ### soda-fountain
 
 A skill plus the `soda-fountain` MCP server (npm `soda-fountain-mcp`, pinned to 2.0.1) for questions about US city, county and state open data on Socrata portals. It covers:

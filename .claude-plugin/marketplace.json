@@ -13,6 +13,11 @@
       "description": "Orchestrator and lane handoffs for multi-session Claude Code work: roles held by session ID, handoff checks, and fresh lane sessions."
     },
     {
+      "name": "doc-index",
+      "source": "./plugins/doc-index",
+      "description": "Make a project's own writing reachable by a session: a one-line-per-document index, a searchable index of documents, notes, issues and decisions served over MCP, and an agent that keeps both true."
+    },
+    {
       "name": "soda-fountain",
       "source": "./plugins/soda-fountain",
       "description": "Query US city, county and state open data on Socrata portals. Starts the soda-fountain MCP server and teaches Claude the discover, schema, SoQL workflow, cross-dataset keys and error handling."
