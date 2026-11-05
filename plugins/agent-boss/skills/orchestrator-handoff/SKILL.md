@@ -20,7 +20,8 @@ Session names are labels for people, and nothing depends on them, with one conve
 
 Files in the handover dir:
 - `agent-boss.conf`: project settings (environment variables of the same names win).
-- `session-roles.json`: the registry. Change it only with `orch claim/drop`.
+- `session-roles.json`: the registry of current role holders. Change it only with `orch claim/drop`.
+- `role-sessions.json`: every session that has ever claimed a role, written by `claim`. It is what makes `sweep` safe, since the registry alone cannot tell a session that lost its role from one that never had one. Entries are forgotten 30 days after a session is gone.
 - `ORCHESTRATOR-HANDOFF.md`: the orchestrator handoff (template below).
 - `ORCHESTRATOR.md`: the board, an append-only log with one line per event. Never read it whole; read the tail.
 - `STANDING-RULES.md`: every rule and settled decision in full. Nobody reads it start to finish.
@@ -86,7 +87,11 @@ This is the pattern that keeps a fresh session affordable. Angkor, the project t
 ## Automatic sweep
 Background sessions outlive their usefulness: a lane that was swapped, a successor's predecessor, a helper that finished. `orch sweep` stops them, and the orchestrator's own turns trigger it, so there is no cron to recreate and nothing to remember.
 
-What it will stop: background sessions **named after a role** that either lost their role and went idle or stuck, or hold `orchestrator-helper` and have been idle `ORCH_SWEEP_MIN` minutes (default 30). What it never touches: a session holding a live role, one holding a lock slot, one quiet less than 5 minutes (a session that has started but not yet claimed its role), and any session not named after a role, which is how the user's own sessions stay safe. Conversations are kept, so anything swept comes back with `claude --bg --resume <session id>`.
+**Only role agents are eligible.** `claim` records every session that takes a role in `role-sessions.json`, and `sweep` considers nothing else. Session names are not used for this, so a background session of your own that happens to be called `graphics` is not a role agent and is never touched, and a role agent is still recognised whatever it is named.
+
+What it will stop: a background session in that ledger that either lost its role and went idle or stuck, or holds `orchestrator-helper` and has been idle `ORCH_SWEEP_MIN` minutes (default 30). What it never touches: a session holding a live role, an interactive session, one holding a lock slot, one quiet less than 5 minutes, and anything that never claimed a role. Conversations are kept, so anything swept comes back with `claude --bg --resume <session id>`.
+
+On an existing project the ledger starts empty, so sweep does nothing until sessions claim their roles again, which happens the next time each lane is started. That is the safe direction: it under-stops rather than over-stops.
 
 `sweep --dry` prints what it would stop. `sweep --auto`, which the Stop hook runs, does nothing unless `ORCH_SWEEP_EVERY` minutes have passed (default 15) and writes to `sweep.log` in the handover dir; set `ORCH_SWEEP_EVERY=0` to leave sweeping manual.
 

@@ -85,11 +85,16 @@ started.
 ## Keeping the session list honest
 
 Sessions accumulate: a lane that was swapped, a predecessor that stepped down, a helper that
-finished. `orch.sh sweep` stops background sessions **named after a role** once they have lost the
-role and gone idle or stuck, and helpers that have been idle `ORCH_SWEEP_MIN` minutes. It never
-touches a live role holder, a lock holder, a session quiet less than 5 minutes, or anything not named
-after a role, which is how the user's own sessions stay safe. Conversations are kept, so a swept
-session comes back with `claude --bg --resume <session id>`.
+finished. `orch.sh sweep` stops them once they have lost their role and gone idle or stuck, and
+helpers idle `ORCH_SWEEP_MIN` minutes.
+
+Eligibility comes from `role-sessions.json`, a ledger of every session that has ever claimed a role,
+written by `claim`. The registry alone cannot answer this question: it holds current holders, so a
+session that lost its role and one that never had one look identical in it. Names cannot answer it
+either, because a session of the user's own may be called `graphics` and a role agent may be called
+anything. With the ledger, sweep touches only sessions that actually took a role, and still never a
+live role holder, an interactive session, a lock holder, or one quiet less than 5 minutes.
+Conversations are kept, so a swept session comes back with `claude --bg --resume <session id>`.
 
 It runs by itself: the orchestrator's own turns trigger `sweep --auto` through the Stop hook, at most
 every `ORCH_SWEEP_EVERY` minutes (default 15), detached and logged to `sweep.log`, so a slow

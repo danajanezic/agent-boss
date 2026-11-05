@@ -156,6 +156,24 @@ def addr(sid): return "uds:/tmp/cc-socks/%s.sock" % live[sid]["pid"] if alive(si
 def save():
     tmp = path + ".tmp"; json.dump(reg, open(tmp, "w"), indent=2); os.replace(tmp, path)
 def holder(r): return (reg.get(r) or {}).get("session")
+# The ledger of every session that has ever claimed a role, beside the registry. The registry holds
+# only current holders, so without this there is no way to tell a session that lost its role from a
+# session that never had one, and `sweep` would have to guess from session names.
+LEDGER = os.path.join(os.path.dirname(path) or ".", "role-sessions.json")
+def ledger_load():
+    try: return json.load(open(LEDGER))
+    except Exception: return {}
+def ledger_add(sid, r):
+    led = ledger_load()
+    e = led.setdefault(sid, {"roles": [], "first": now})
+    if r not in e["roles"]: e["roles"].append(r)
+    e["last"] = now
+    # Forget sessions that are gone and were last seen over 30 days ago, so the file stays small.
+    import datetime
+    cut = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime("%Y-%m-%d %H:%M")
+    led = {k: v for k, v in led.items() if alive(k) or (v.get("last") or "") >= cut}
+    led[sid] = e
+    tmp = LEDGER + ".tmp"; json.dump(led, open(tmp, "w"), indent=2); os.replace(tmp, LEDGER)
 if act in ("claim", "drop") and not me: sys.exit("no CLAUDE_CODE_SESSION_ID: run this inside the Claude session that takes the role")
 if act == "claim":
     cur = holder(role)
@@ -167,6 +185,8 @@ if act == "claim":
         reg[key] = {"session": cur, "since": now, "note": "stepped down; finishes its in-flight items, then ends"}
         if key != "orchestrator-helper": print("note: a live helper already exists; old orchestrator saved as " + key)
     reg[role] = {"session": me, "since": now}; save()
+    if role == "orchestrator" and cur and cur != me: ledger_add(cur, key)
+    ledger_add(me, role)
     print("%s -> %s (%s)" % (role, me, addr(me) or "not visible in claude agents yet"))
     if role == "orchestrator" and (live.get(me, {}).get("name") or "orchestrator") != "*orchestrator":
         # A live session can't be renamed, so the star is set when the session is launched
@@ -189,31 +209,32 @@ elif act == "bgid":
     sid = holder(role); x = live.get(sid or "", {})
     print(x.get("id", "") if x.get("kind") == "background" and x.get("pid") else "")
 elif act == "defunct":
-    # Background sessions this script started (they are named after a role) that no longer hold a
-    # role, plus orchestrator-helpers that have gone idle. arg = the lane role names, comma-separated.
+    # Background role agents that are finished with: ones that have lost their role, plus
+    # orchestrator-helpers gone idle. Eligibility comes from the ledger, so only a session that
+    # actually claimed a role can ever be stopped: a session of the user's own that happens to be
+    # named after a lane is not a role agent and is never touched.
     import glob, time
-    base = set(x for x in arg.split(",") if x) | {"orchestrator"}
-    names = base | {"*" + n for n in base}   # the active orchestrator runs as *orchestrator
     mins = int(os.environ.get("SWEEP_MIN") or 30)
+    led = ledger_load()
     owner = {v.get("session"): r for r, v in reg.items() if isinstance(v, dict)}
     for sid, x in live.items():
-        if x.get("kind") != "background" or not x.get("pid") or not x.get("id") or x.get("name") not in names: continue
+        if x.get("kind") != "background" or not x.get("pid") or not x.get("id"): continue
+        if sid not in led: continue
         r = owner.get(sid, "")
         if r and not r.startswith("orchestrator-helper"): continue
         tf = sorted(glob.glob(os.path.expanduser("~/.claude/projects/*/%s.jsonl" % sid)), key=os.path.getmtime)
         if tf:
             quiet = int((time.time() - os.path.getmtime(tf[-1])) / 60)
         else:
-            # No transcript yet, so this is a session that just started: fall back to process age,
-            # or a lane would be swept in the seconds before its first command claims its role.
+            # No transcript yet: fall back to process age rather than treating it as quiet forever.
             et = subprocess.run(["ps", "-o", "etime=", "-p", str(x["pid"])], capture_output=True, text=True).stdout.strip()
             dd, _, hms = et.rpartition("-"); p = [int(v) for v in hms.split(":")] if hms else [0]
             while len(p) < 3: p.insert(0, 0)
             quiet = (int(dd or 0) * 1440) + p[0] * 60 + p[1]
         idle = x.get("status") == "idle"
-        # A roleless session goes once it is idle or stuck; a helper only after it has been quiet a
-        # while, because a helper legitimately waits on lanes. The 5-minute floor protects a session
-        # that has started but not yet claimed its role.
+        # A former role agent goes once it is idle or stuck; a helper only after it has been quiet a
+        # while, because a helper legitimately waits on lanes. The 5-minute floor covers the moment
+        # between a planned handoff and the outgoing session settling.
         if (not r and quiet >= 5 and (idle or quiet >= mins)) or (r and idle and quiet >= mins):
             print("%s %s %s %s %d" % (x["id"], sid, x.get("name"), r or "-", quiet))
 elif act == "roles":
@@ -342,10 +363,11 @@ brief)
   startup_size "$2" ;;
 size) lane_field "$2" 3 >/dev/null || { echo "unknown lane $2 (see $LANES)"; exit 2; }; startup_size "$2" ;;
 sweep)
-  # Stop background sessions this script started that are now defunct: ones that lost their role and
-  # went idle or stuck, and orchestrator-helpers idle SWEEP_MIN minutes. Only sessions named after a
-  # role are ever touched, never the user's own, and never one holding a lock slot. Conversations are
-  # kept, so any of them can come back with `claude --bg --resume <session>`.
+  # Stop role agents that are finished with: background sessions that claimed a role, then lost it
+  # and went idle or stuck, plus orchestrator-helpers idle SWEEP_MIN minutes. Only sessions listed
+  # in role-sessions.json (written by `claim`) are ever eligible, so a session of the user's own is
+  # never touched whatever it is named, and nor is one holding a lock slot. Conversations are kept,
+  # so any of them can come back with `claude --bg --resume <session>`.
   #   --dry    print what it would stop
   #   --auto   do nothing unless ORCH_SWEEP_EVERY minutes have passed since the last automatic run
   if [ "$2" = "--auto" ]; then
@@ -354,7 +376,7 @@ sweep)
     [ -f "$stamp" ] && [ "$(age_min "$stamp")" -lt "$SWEEP_EVERY" ] && exit 0
     now > "$stamp"
   fi
-  py defunct x "$(grep -v '^#' "$LANES" 2>/dev/null | cut -f1 | paste -sd, -)" | while read -r id sid name role quiet; do
+  py defunct | while read -r id sid name role quiet; do
     if [ -n "$LOCK" ] && "$LOCK" who 2>/dev/null | grep -q -- "$sid"; then
       echo "skip $name $id: holds a lock slot"; continue
     fi
