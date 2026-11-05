@@ -1,0 +1,8 @@
+{
+  "name": "doc-index",
+  "version": "0.1.0",
+  "description": "Make a project's own writing reachable by a session: a one-line-per-document index, a searchable index of documents, notes, issues and decisions served over MCP, and an agent that keeps both true.",
+  "author": { "name": "danajanezic" },
+  "license": "MIT",
+  "keywords": ["documentation", "index", "search", "decisions", "mcp"]
+}

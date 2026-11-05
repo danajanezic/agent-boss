@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+"""docidx: keep a one-line-per-document index beside the documents, and keep the two in step.
+
+    docidx add <file> "<one-line hook>"   add or update the file's line in the index
+    docidx check                          lines with no document, documents with no line, dead links
+    docidx size                           what a session reads if it reads the index at startup
+    docidx list                           the index as it stands
+    docidx refresh [--github owner/repo]  rebuild the searchable index over the same documents
+    docidx schedule [--every 30] [--off]  run that refresh on a timer (launchd on macOS, cron else)
+
+Why an index at all: a session cannot read a project's documents at startup and still have room to
+work. It can read one line per document, and open the document when its line touches the step it is
+about to take. The index is the cheap thing that makes the expensive thing reachable.
+
+Settings, from the environment or .doc-index/config (plain KEY="value" lines, never run as shell):
+  DOC_INDEX_FILE   the index (default docs/INDEX.md)
+  DOC_INDEX_DOCS   the directory the index covers (default docs)
+  DOC_INDEX_DB     the searchable index (default .doc-index/index.sqlite)
+  DOC_INDEX_CTX    context window used by `size` (default 200000)
+  DOC_INDEX_WARN   warn at this percent of it (default 10)
+"""
+import argparse, os, re, shutil, subprocess, sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+LINE_RE = re.compile(r"^\s*-\s*\[(?P<title>[^\]]+)\]\((?P<path>[^)]+)\)\s*(?:[-—:]\s*(?P<hook>.*))?$")
+
+
+def conf():
+    """Environment first, then .doc-index/config, then the defaults."""
+    c = {"DOC_INDEX_FILE": "docs/INDEX.md", "DOC_INDEX_DOCS": "docs",
+         "DOC_INDEX_DB": ".doc-index/index.sqlite", "DOC_INDEX_CTX": "200000",
+         "DOC_INDEX_WARN": "10"}
+    path = os.path.join(os.getcwd(), ".doc-index", "config")
+    if os.path.exists(path):
+        for line in open(path):
+            m = re.match(r'^(DOC_INDEX_[A-Z_]+)=\s*"?([^"\n]*)"?\s*$', line)
+            if m:
+                c[m.group(1)] = m.group(2)
+    for k in list(c):
+        if os.environ.get(k):
+            c[k] = os.environ[k]
+    return c
+
+
+C = conf()
+INDEX = C["DOC_INDEX_FILE"]
+DOCS = C["DOC_INDEX_DOCS"]
+
+
+def read_index():
+    """[(title, path, hook, raw_line_number)] for the entries, in file order."""
+    if not os.path.exists(INDEX):
+        return []
+    out = []
+    for n, line in enumerate(open(INDEX).read().splitlines(), 1):
+        m = LINE_RE.match(line)
+        if m:
+            out.append((m.group("title").strip(), m.group("path").strip(),
+                        (m.group("hook") or "").strip(), n))
+    return out
+
+
+def docs_on_disk():
+    if not os.path.isdir(DOCS):
+        return []
+    out = []
+    for dirpath, dirnames, filenames in os.walk(DOCS):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for fn in sorted(filenames):
+            if fn.lower().endswith((".md", ".markdown")) and fn != os.path.basename(INDEX):
+                out.append(os.path.join(dirpath, fn))
+    return out
+
+
+def title_of(path):
+    try:
+        for line in open(path):
+            if line.startswith("#"):
+                return line.lstrip("#").strip()[:80]
+    except Exception:
+        pass
+    return os.path.splitext(os.path.basename(path))[0].replace("-", " ")
+
+
+def rel_to_index(path):
+    return os.path.relpath(os.path.abspath(path), os.path.dirname(os.path.abspath(INDEX)) or ".")
+
+
+def cmd_add(a):
+    if not os.path.exists(a.file):
+        sys.exit("no such file: %s" % a.file)
+    hook = " ".join(a.hook).strip()
+    if not hook:
+        sys.exit("give the line a hook: one phrase saying when to open this document")
+    if len(hook) > 120:
+        sys.exit("that hook is %d characters; an index line earns its place by being short "
+                 "(aim for under 100)" % len(hook))
+    title, rel = title_of(a.file), rel_to_index(a.file)
+    line = "- [%s](%s) — %s" % (title, rel, hook)
+    os.makedirs(os.path.dirname(os.path.abspath(INDEX)) or ".", exist_ok=True)
+    body = open(INDEX).read().splitlines() if os.path.exists(INDEX) else ["# Index", ""]
+    for i, raw in enumerate(body):
+        m = LINE_RE.match(raw)
+        if m and m.group("path").strip() == rel:
+            body[i] = line
+            open(INDEX, "w").write("\n".join(body) + "\n")
+            print("updated %s in %s" % (rel, INDEX))
+            return
+    body.append(line)
+    open(INDEX, "w").write("\n".join(body) + "\n")
+    print("added %s to %s" % (rel, INDEX))
+
+
+def cmd_check(a):
+    entries, bad = read_index(), 0
+    base = os.path.dirname(os.path.abspath(INDEX)) or "."
+    listed = set()
+    if not os.path.exists(INDEX):
+        print("FAIL: no index at %s (make one with: docidx add <file> \"<hook>\")" % INDEX)
+        return 1
+    for title, path, hook, n in entries:
+        full = os.path.normpath(os.path.join(base, path))
+        listed.add(os.path.abspath(full))
+        if not os.path.exists(full):
+            print("FAIL: %s:%d points at %s, which is not there" % (INDEX, n, path)); bad += 1
+            continue
+        if not hook:
+            print("FAIL: %s:%d has no hook, so nobody knows when to open %s" % (INDEX, n, path)); bad += 1
+        real = title_of(full)
+        if real and title.lower() != real.lower():
+            print("WARN: %s:%d calls it %r; the document's own heading is %r" % (INDEX, n, title, real))
+    for d in docs_on_disk():
+        if os.path.abspath(d) not in listed:
+            print("FAIL: %s is not in %s (add it, or say why it is not worth a line)" % (d, INDEX)); bad += 1
+    print("OK: %d entries, every document listed and present" % len(entries) if not bad
+          else "%d problem(s)" % bad)
+    return 1 if bad else 0
+
+
+def cmd_size(a):
+    if not os.path.exists(INDEX):
+        sys.exit("no index at %s" % INDEX)
+    idx = os.path.getsize(INDEX)
+    full = sum(os.path.getsize(d) for d in docs_on_disk())
+    ctx, warn = int(C["DOC_INDEX_CTX"]), int(C["DOC_INDEX_WARN"])
+    it, ft = idx // 4, full // 4
+    pct = it * 100 // max(ctx, 1)
+    print("index %s: %d bytes, about %d tokens (%d%% of %d)" % (INDEX, idx, it, pct, ctx))
+    print("the documents it points at: %d bytes, about %d tokens (%dx the index)"
+          % (full, ft, (ft // max(it, 1))))
+    if pct >= warn:
+        print("WARN: at or over %d%% of the context window. Shorten the hooks, or split the index "
+              "so a session reads only the part that covers its work." % warn)
+
+
+def cmd_list(a):
+    for title, path, hook, n in read_index():
+        print("%-40s %-34s %s" % (title[:40], path[:34], hook))
+
+
+def db_path():
+    return os.path.abspath(C["DOC_INDEX_DB"])
+
+
+def cmd_refresh(a):
+    roots = ["docs=" + DOCS]
+    for extra in a.root or []:
+        roots.append(extra)
+    cmd = [sys.executable, "-I", os.path.join(ROOT, "server", "indexer.py"), "--db", db_path(), "refresh"]
+    for r in roots:
+        cmd += ["--root", r]
+    for g in a.github or []:
+        cmd += ["--github", g]
+    os.execv(sys.executable, cmd)
+
+
+PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>%(label)s</string>
+  <key>ProgramArguments</key><array>
+    <string>%(python)s</string><string>-I</string><string>%(indexer)s</string>
+    <string>--db</string><string>%(db)s</string><string>refresh</string>
+%(roots)s  </array>
+  <key>WorkingDirectory</key><string>%(cwd)s</string>
+  <key>StartInterval</key><integer>%(seconds)d</integer>
+  <key>StandardOutPath</key><string>%(log)s</string>
+  <key>StandardErrorPath</key><string>%(log)s</string>
+</dict></plist>
+"""
+
+
+def cmd_schedule(a):
+    """Keep the searchable index fresh without a session. A stale index answers from last week."""
+    label = "com.doc-index." + re.sub(r"[^A-Za-z0-9.-]", "-", os.path.basename(os.getcwd()))[:40]
+    plist = os.path.expanduser("~/Library/LaunchAgents/%s.plist" % label)
+    mac = sys.platform == "darwin"
+    if a.off:
+        if mac and os.path.exists(plist):
+            subprocess.run(["launchctl", "bootout", "gui/%d/%s" % (os.getuid(), label)],
+                           capture_output=True)
+            os.remove(plist)
+            print("removed %s" % plist)
+        else:
+            print("nothing scheduled here" if mac else "remove the cron line by hand (crontab -e)")
+        return
+    roots = "".join('    <string>--root</string><string>%s</string>\n' % r
+                    for r in ["docs=" + os.path.abspath(DOCS)] + (a.root or []))
+    for g in a.github or []:
+        roots += '    <string>--github</string><string>%s</string>\n' % g
+    log = os.path.abspath(os.path.join(os.path.dirname(db_path()), "refresh.log"))
+    os.makedirs(os.path.dirname(log), exist_ok=True)
+    if not mac:
+        line = "*/%d * * * * cd %s && %s -I %s --db %s refresh --root docs=%s >> %s 2>&1" % (
+            a.every, os.getcwd(), sys.executable, os.path.join(ROOT, "server", "indexer.py"),
+            db_path(), os.path.abspath(DOCS), log)
+        print("not macOS: add this line with `crontab -e`\n  " + line)
+        return
+    os.makedirs(os.path.dirname(plist), exist_ok=True)
+    open(plist, "w").write(PLIST % {
+        "label": label, "python": shutil.which("python3") or sys.executable,
+        "indexer": os.path.join(ROOT, "server", "indexer.py"), "db": db_path(),
+        "roots": roots, "cwd": os.getcwd(), "seconds": a.every * 60, "log": log})
+    subprocess.run(["launchctl", "bootout", "gui/%d/%s" % (os.getuid(), label)], capture_output=True)
+    p = subprocess.run(["launchctl", "bootstrap", "gui/%d" % os.getuid(), plist],
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        sys.exit("launchctl bootstrap failed: %s" % (p.stderr.strip()[:300] or p.returncode))
+    print("scheduled %s every %d minutes\n  plist: %s\n  log:   %s" % (label, a.every, plist, log))
+    print("check it with: launchctl list | grep %s" % label)
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="docidx", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sp = ap.add_subparsers(dest="cmd", required=True)
+    s = sp.add_parser("add"); s.add_argument("file"); s.add_argument("hook", nargs="+"); s.set_defaults(f=cmd_add)
+    s = sp.add_parser("check"); s.set_defaults(f=cmd_check)
+    s = sp.add_parser("size"); s.set_defaults(f=cmd_size)
+    s = sp.add_parser("list"); s.set_defaults(f=cmd_list)
+    s = sp.add_parser("refresh"); s.add_argument("--root", action="append")
+    s.add_argument("--github", action="append"); s.set_defaults(f=cmd_refresh)
+    s = sp.add_parser("schedule"); s.add_argument("--every", type=int, default=30)
+    s.add_argument("--root", action="append"); s.add_argument("--github", action="append")
+    s.add_argument("--off", action="store_true"); s.set_defaults(f=cmd_schedule)
+    a = ap.parse_args()
+    sys.exit(a.f(a) or 0)
+
+
+if __name__ == "__main__":
+    main()
