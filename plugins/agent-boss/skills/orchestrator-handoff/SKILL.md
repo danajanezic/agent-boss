@@ -11,20 +11,26 @@ In this skill, `orch` means `sh "${CLAUDE_SKILL_DIR}/orch.sh"`. Run `orch` with 
 ```
 orch addr orchestrator   # -> uds:/tmp/cc-socks/<pid>.sock, or OFFLINE <id> (exit 1)
 ```
-Look the address up again before each message, because the pid changes when a session restarts. Session names are only labels for people, and nothing depends on them.
+Look the address up again before each message, because the pid changes when a session restarts. Prefer `orch msg` for lane reports (see The mailbox): an address only reaches a session that is up right now.
+
+Session names are labels for people, and nothing depends on them, with one convention: **the active orchestrator runs as `*orchestrator`**, so the starred row in `claude agents` is the one in charge. `start-successor` names it that way. A live session cannot rename itself (Claude cannot run slash commands, and there is no rename tool as of 2.1.318), so a session that claims the role under another name says so, and the user can run `/rename *orchestrator` in it. The session that steps down keeps whatever name it had until `sweep` stops it.
 
 ## Setup (once per project)
 `orch init <dir>` creates a handover dir with starter files. Then edit `agent-boss.conf` (project name, user, GitHub repo) and `orchestrator-lanes.tsv`, and point sessions at the dir with `ORCH_DIR` or `~/.config/agent-boss/config` (`ORCH_DIR="/path/to/dir"`, plus the optional `ORCH_LOCK` and `ORCH_SNAPSHOT_HOOK`, which run programs and so are never read from the handover dir). If `orch` says ORCH_DIR is not set, ask the user which handover dir to use; don't guess.
 
 Files in the handover dir:
 - `agent-boss.conf`: project settings (environment variables of the same names win).
-- `session-roles.json`: the registry. Change it only with `orch claim/drop`.
+- `session-roles.json`: the registry of current role holders. Change it only with `orch claim/drop`.
+- `role-sessions.json`: every session that has ever claimed a role, written by `claim`. It is what makes `sweep` safe, since the registry alone cannot tell a session that lost its role from one that never had one. Entries are forgotten 30 days after a session is gone.
 - `ORCHESTRATOR-HANDOFF.md`: the orchestrator handoff (template below).
 - `ORCHESTRATOR.md`: the board, an append-only log with one line per event. Never read it whole; read the tail.
-- `CURRENT-STATE.md`: the single source of truth for rules, decisions and open work. Handoffs point to it and don't repeat it.
+- `STANDING-RULES.md`: every rule and settled decision in full. Nobody reads it start to finish.
+- `STANDING-RULES-SUMMARY.md`: one line per rule, each naming that rule's bold title in the full file. Every session reads this one at startup and greps the full rule when a line touches the step it is on.
+- `CURRENT-STATE.md`: today's moving state only (open work by lane, open questions). Handoffs point to it and don't repeat it. Keep it small: when it grows, move the old parts to a dated archive file rather than deleting them.
 - `orchestrator-crons.md`: the exact prompts of the orchestrator's crons. Crons are session-only, so a new orchestrator recreates them from this file.
 - `orchestrator-lanes.tsv`: one row per lane (role, model, handoff file, start dir, required notes dir, job). `lane-handoffs/<role>.md` is each lane's handoff. `start-lane` starts the lane in its start dir and tells it to read its required notes first.
-- `lane-notes/<role>/`: standing rules for a lane, `MEMORY.md` first (optional).
+- `lane-notes/<role>/`: standing rules for one lane, `MEMORY.md` first (optional).
+- `mq/messages.sqlite`: the role mailbox (see The mailbox below). `adhoc-handoffs/`: handoffs from sessions that hold no role.
 
 Commands:
 - `snapshot`: this machine's disk, the build lock, the snapshot hook's lines, PRs and roles in one block.
@@ -32,7 +38,9 @@ Commands:
 - `claim <role> [--force]`, `drop <role>`, `addr <role>`, `roles`, `show`: the role registry.
 - `check-lane`, `size`, `stop-lane`, `start-lane <role>`: lane transitions.
 - `lanes`, `add-lane <role> <model> <start dir> "<job>"`: list lanes, add one (`/agent-boss:define-role` walks the user through designing it first).
-- `context`, `start-successor`, `hook-stop`: the automatic orchestrator handoff (see below).
+- `context`, `start-successor`, `hook-stop`: the automatic handoff (see below).
+- `msg <subcommand>`: the role mailbox (`send`, `check`, `reply`, `inbox`, `show`, `ack`, `log`, `stale`, `watch`).
+- `sweep [--dry]`: stop defunct role-named background sessions. It also runs by itself (see Automatic sweep).
 - `brief <role>`: what a subagent needs to work as that role (model, start dir, files to read, live holder). `/agent-boss:spawn <role> <task>` uses it to start an in-session role subagent.
 
 `claim` refuses a role that a live session holds unless you pass `--force`, which is only for a planned handoff. Claiming `orchestrator` moves the previous holder to `orchestrator-helper`, or to `orchestrator-helper-<id>` if a live helper already exists. One helper is enough: the new orchestrator picks one, and the others end.
@@ -53,8 +61,51 @@ Commands:
 6. Tell the user to start the new session and paste: `Run /orchestrator-handoff take-over.` Renaming sessions isn't needed.
 7. Keep your crons running until the new orchestrator messages you. Then cancel every cron, reply with your in-flight status, and work only as helper (rules below).
 
+## The mailbox
+`orch msg` is a SQLite mailbox addressed to **roles, not sessions**, so a message waits while a lane is parked, offline or being swapped, and the replacement session collects it on its first check. Every message is kept, so `msg log` is the project's conversation history between sessions.
+
+```
+orch msg send graphics "rebase on main and re-run the shots"
+echo "long report" | orch msg send orchestrator        # the body can come on stdin
+orch msg send all "main is red, hold merges"           # one copy per lane
+orch msg check graphics                                # new messages, marked delivered; silent when empty
+orch msg reply 42 "done, run r-789"                    # back to the sender, same thread
+orch msg stale --min 10                                # roles whose messages nobody is collecting
+```
+
+Delivery is a cron in each lane, created by `start-lane`: every 5 minutes, run `msg check <role>`, act on anything it prints, reply. Two facts about those crons decide how this fails. They die with their session, so every fresh lane makes its own, and they expire after 7 days, so a long-lived lane must remake it. A lane whose cron is gone looks exactly like a lane with nothing to say, so check `msg stale --min 10` when a lane goes quiet: if it names that role, tell the lane to recreate its cron, or swap the lane.
+
+Prefer the mailbox over SendMessage for anything that matters. SendMessage reaches a socket tied to a process ID, so a report sent while a lane restarts is simply lost. Keep SendMessage for the fallback the lane prompt names, and for the orchestrator-to-helper messages during a handoff.
+
+## Standing rules, and how sessions read them
+Rules live in two files. `STANDING-RULES.md` holds every rule in full; `STANDING-RULES-SUMMARY.md` holds one line per rule, each line naming that rule's **bold title** in the full file. Every session reads the summary at startup, and before acting on a step a line touches, greps the bold title in the full file and reads the whole rule.
+
+Keep them in step: when you add a rule, add its summary line in the same edit, and when a rule changes, keep its bold title the same so every session's grep still finds it. A rule that applies to one lane only belongs in `lane-notes/<role>/` instead, with its line in that folder's `MEMORY.md`.
+
+This is the pattern that keeps a fresh session affordable. Angkor, the project this plugin grew out of, runs 8 to 10 sessions a day against 436 lines of rules that nobody reads at startup: the summary is 28.5 KB, the full file 131 KB.
+
+## Automatic sweep
+Background sessions outlive their usefulness: a lane that was swapped, a successor's predecessor, a helper that finished. `orch sweep` stops them, and the orchestrator's own turns trigger it, so there is no cron to recreate and nothing to remember.
+
+**Only role agents are eligible.** `claim` records every session that takes a role in `role-sessions.json`, and `sweep` considers nothing else. Session names are not used for this, so a background session of your own that happens to be called `graphics` is not a role agent and is never touched, and a role agent is still recognised whatever it is named.
+
+What it will stop: a background session in that ledger that either lost its role and went idle or stuck, or holds `orchestrator-helper` and has been idle `ORCH_SWEEP_MIN` minutes (default 30). What it never touches: a session holding a live role, an interactive session, one holding a lock slot, one quiet less than 5 minutes, and anything that never claimed a role. Conversations are kept, so anything swept comes back with `claude --bg --resume <session id>`.
+
+On an existing project the ledger starts empty, so sweep does nothing until sessions claim their roles again, which happens the next time each lane is started. That is the safe direction: it under-stops rather than over-stops.
+
+`sweep --dry` prints what it would stop. `sweep --auto`, which the Stop hook runs, does nothing unless `ORCH_SWEEP_EVERY` minutes have passed (default 15) and writes to `sweep.log` in the handover dir; set `ORCH_SWEEP_EVERY=0` to leave sweeping manual.
+
 ## Automatic handoff
-The plugin's Stop hook checks the orchestrator's context at the end of each turn. Once it passes `ORCH_HANDOFF_AT` (default 150000 tokens; 0 turns it off), the hook keeps you working with an instruction to hand off. It asks once per session, and only the session that holds the orchestrator role. `orch context` shows your current size. When it asks:
+The plugin's Stop hook checks **every** session's context at the end of each turn, in every project. Past `ORCH_HANDOFF_AT` (default 250000 tokens; 0 turns it off) it keeps the session working with an instruction to hand off, worded for the role that session holds. Past `ORCH_HANDOFF_AGAIN_AT` (default 350000) it asks a second time and runs `ORCH_NOTIFY` if one is set. Each session gets each notice once.
+
+- **orchestrator:** hand off as below.
+- **a lane:** park, write `lane-handoffs/<role>.md`, and message the orchestrator, which swaps the session (see Lane transition).
+- **orchestrator-helper:** no notice, because it is winding down anyway.
+- **any other session:** write `adhoc-handoffs/<date>-<session>.md` and tell the user how to continue in a fresh session.
+
+The default is 250000 rather than 150000 because a fresh session spends a good part of a 150k budget on its startup reading before it does any work, so lanes were handing off almost as soon as they started.
+
+`orch context` shows your current size. When the hook asks you, as orchestrator:
 1. Park the current step, as in Step-down step 1. If something can't be parked (the user is mid-decision, a merge is half done), finish that first, but start nothing new.
 2. Do Step-down steps 2-5 (archive, handoff, In flight, crons, check-handoff).
 3. Run `orch start-successor`. It refuses unless you hold the orchestrator role and the handoff passes `check-handoff`, and it starts at most one successor per session. The successor runs in the background with `ORCH_ORCHESTRATOR_MODEL` (default opus) and the lane permission mode, does Take-over, and messages you.
@@ -62,7 +113,7 @@ The plugin's Stop hook checks the orchestrator's context at the end of each turn
 5. Continue with Step-down step 7: keep your crons until the successor confirms, then cancel them and work as helper.
 
 ## Take-over (incoming orchestrator)
-1. Read `ORCHESTRATOR-HANDOFF.md`, `CURRENT-STATE.md`, then the last 40 lines of the board. Run `orch check-handoff`. If it's stale, ask the old orchestrator to refresh it first (its address comes from `addr orchestrator`, before you claim).
+1. Read `ORCHESTRATOR-HANDOFF.md`, `STANDING-RULES-SUMMARY.md`, `CURRENT-STATE.md`, then the last 40 lines of the board. Run `orch check-handoff`. If it's stale, ask the old orchestrator to refresh it first (its address comes from `addr orchestrator`, before you claim).
 2. Run `orch claim orchestrator --force`. The old holder becomes `orchestrator-helper`.
 3. Run `orch snapshot` and compare it with the handoff. A new session gets fresh OS permissions (for example macOS disk access), so note any change.
 4. Recreate every cron in `orchestrator-crons.md` with CronCreate.
@@ -85,7 +136,7 @@ The helper winds down each old lane, and the new orchestrator starts its replace
    - A background session: run `orch stop-lane <role>`. The conversation is kept, and `claude --bg --resume <session id>` restores it.
    - An interactive one: ask the user to close it.
 4. **Helper: report to the orchestrator:** "<role> parked, handoff <path>, old session stopped, in flight: …".
-5. **Orchestrator: start the replacement.** Run `orch start-lane <role>`. It refuses while a live session holds the role. The new session claims the role itself, reads its notes and handoff, and messages the orchestrator. Check its plan against the handoff's Next section before giving it work.
+5. **Orchestrator: start the replacement.** Run `orch start-lane <role>`. It refuses while a live session holds the role. The new session claims the role itself, reads its notes, the rules summary, today's state and its handoff, creates its mailbox cron, and messages the orchestrator. Check its plan against the handoff's Next section before giving it work, and check that `msg stale` stops naming that role once its cron exists.
 6. Both sessions log one board line per lane.
 
 If a lane can't park (a long job is running), skip it and come back later. Never stop a session that holds a lock slot or is in the middle of a push.
@@ -93,7 +144,7 @@ If a lane can't park (a long job is running), skip it and come back later. Never
 ## Lane notes
 When a lane gets a standing rule from the user, save it in `lane-notes/<role>/` (with a line in that folder's `MEMORY.md`), not only in its handoff. A handoff describes the current state; the notes folder holds rules that outlast it. `start-lane` tells every new lane to read its notes first.
 
-**Size check:** `orch size <role>` (also printed by `check-lane`) estimates a fresh lane's startup reading (notes + handoff + CURRENT-STATE, about 4 characters per token) against `ORCH_CTX`. At `ORCH_CTX_WARN_PCT` it prints WARN: suggest progressive disclosure to the user (for example an index note that names which notes to open when).
+**Size check:** `orch size <role>` (also printed by `check-lane`) estimates a fresh lane's startup reading (notes + the rules summary + handoff + CURRENT-STATE, about 4 characters per token) against `ORCH_CTX`. The full `STANDING-RULES.md` is not counted, because a lane greps one rule out of it rather than reading it. At `ORCH_CTX_WARN_PCT` it prints WARN: suggest progressive disclosure to the user (for example an index note that names which notes to open when).
 
 ## Helper rules
 - Send lanes no instructions, and don't merge PRs. Your work is the in-flight items, the lane wind-down, and any task the orchestrator hands you.
@@ -103,20 +154,22 @@ When a lane gets a standing rule from the user, save it in `lane-notes/<role>/` 
 ## Orchestrator handoff template
 ```
 # Orchestrator handoff (YYYY-MM-DD, about HH:MM)
-Read this, then CURRENT-STATE.md, then the last 40 lines of ORCHESTRATOR.md. Then run /orchestrator-handoff take-over.
+Read this, then STANDING-RULES-SUMMARY.md, then CURRENT-STATE.md, then the last 40 lines of ORCHESTRATOR.md. Then run /orchestrator-handoff take-over.
 ## First things       (deadlines today, the user's pending notes, anything time-critical)
 ## Asking the user    (the decision queue and the suggested order; one at a time)
 ## Machines           (paste of orch snapshot, plus permission or lock problems and their fixes)
 ## Lanes              (one bullet per lane: doing, waiting on, blocked by)
 ## In flight          (subagents, waits and runs this session started: branch, run ID, output file, who finishes it)
-## Standing rules     (short; point to CURRENT-STATE for the rest)
+## Standing rules     (short; point to STANDING-RULES-SUMMARY.md for the rest)
 ```
 `check-handoff` accepts any section heading that starts with "Asking" (for example "Asking Sam").
 
 ## Common mistakes
 - Reading a lane's "waiting" state as idle. In `orch roles`, "waiting" can mean the background session is stuck on a permission prompt nobody sees. If a lane shows "waiting" with no report for 30 minutes, read `claude logs <id>` for "Do you want to proceed?" and ask the user to answer it with `claude attach <id>`.
 - Assuming an idle background lane is still there. Idle `--bg` lanes can exit on their own within about an hour. Check `orch roles` before handing work over; when one is offline, refresh its handoff and `start-lane` it.
-- Messaging a role by session name. Always use `addr <role>`.
+- Messaging a role by session name. Always use `orch msg send <role>`, or `addr <role>` for a live session.
+- Treating a SendMessage as delivered. It reaches a process that is up right now; a lane restarting at that moment never sees it, and nothing says so. Anything that matters goes through `orch msg`.
+- Reading a quiet lane as a lane with nothing to say. Check `orch msg stale --min 10`: a lane whose delivery cron died has messages piling up undelivered.
 - Cancelling crons before the new orchestrator confirms it has recreated them.
 - Giving lane instructions after stepping down, which splits authority.
 - Writing `session-roles.json` by hand. Use `claim` and `drop`, which refuse to take a live holder's role by accident.
