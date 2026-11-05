@@ -116,9 +116,15 @@ def split_chunks(text):
     return out or [("", text[:CHUNK_CHARS])]
 
 
-def find_decisions(text):
-    """Marked decision lines, with the heading they sit under and any date or name on the line."""
+def find_decisions(text, trusted_author=None):
+    """Marked decision lines, with the heading they sit under and any date or name on the line.
+
+    `trusted_author`, when given, overrides whatever name the line claims. A decision's weight
+    comes from who made it, so for anything that arrives from outside the repository the authority
+    is the author the API reports, never the "by X" somebody typed into the text.
+    """
     found, heading = [], ""
+    today = time.strftime("%Y-%m-%d")
     for n, line in enumerate(text.splitlines(), 1):
         if line.startswith("#"):
             heading = line.lstrip("#").strip()[:200]
@@ -129,14 +135,22 @@ def find_decisions(text):
         body = m.group(1).strip()
         when = WHEN_RE.search(body)
         who = WHO_RE.search(body)
-        found.append({"topic": heading, "text": body[:800], "line": n,
-                      "decided_on": when.group(1) if when else "",
-                      "decided_by": who.group(1) if who else ""})
+        on = when.group(1) if when else ""
+        if on > today:
+            on = ""   # a date in the future cannot order anything; treat the line as undated
+        found.append({"topic": heading, "text": body[:800], "line": n, "decided_on": on,
+                      "decided_by": trusted_author or (who.group(1) if who else "")})
     return found
 
 
-def put_source(c, root, path, title, text, kind, meta, size=0, modified=0):
-    """Insert or update one source and everything derived from it. Returns 'new', 'updated', 'same'."""
+def put_source(c, root, path, title, text, kind, meta, size=0, modified=0,
+               decisions=True, decision_author=None):
+    """Insert or update one source and everything derived from it. Returns 'new', 'updated', 'same'.
+
+    `decisions=False` indexes the text for search but records no decisions from it. Use it for
+    anything a stranger can write: a comment on a public issue is worth searching and is not
+    evidence of what the project decided.
+    """
     dg = digest(text)
     row = c.execute("SELECT id, digest FROM sources WHERE path=?", (path,)).fetchone()
     if row and row["digest"] == dg:
@@ -165,7 +179,7 @@ def put_source(c, root, path, title, text, kind, meta, size=0, modified=0):
                             (sid, i, h, body)).lastrowid
             c.execute("INSERT INTO search(body,heading,title,path,chunk_id) VALUES(?,?,?,?,?)",
                       (body, h, title, path, cid))
-        for d in find_decisions(text):
+        for d in (find_decisions(text, decision_author) if decisions else []):
             c.execute("""INSERT INTO decisions(source_id,topic,text,decided_on,decided_by,line)
                          VALUES(?,?,?,?,?,?)""",
                       (sid, d["topic"], d["text"], d["decided_on"], d["decided_by"], d["line"]))
@@ -184,15 +198,31 @@ def walk_root(c, kind, path, counts):
             return
         print("  skipped %s: no such directory" % base, file=sys.stderr)
         return
-    for dirpath, dirnames, filenames in os.walk(base):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
+    # followlinks stays off, and symlinked files are skipped as well: a link in a docs directory
+    # can point at ~/.ssh/id_rsa, and indexing it would copy the contents into a database that a
+    # session can then search. Anything whose real path leaves the root is skipped too.
+    for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+        dirnames[:] = [d for d in dirnames
+                       if d not in SKIP_DIRS and not d.startswith(".")
+                       and not os.path.islink(os.path.join(dirpath, d))]
         for fn in filenames:
-            if os.path.splitext(fn)[1].lower() in TEXT_SUFFIXES:
-                index_file(c, kind, os.path.join(dirpath, fn), counts)
+            if os.path.splitext(fn)[1].lower() not in TEXT_SUFFIXES:
+                continue
+            full = os.path.join(dirpath, fn)
+            if os.path.islink(full):
+                counts["symlink skipped"] = counts.get("symlink skipped", 0) + 1
+                continue
+            if not os.path.realpath(full).startswith(base + os.sep):
+                counts["outside the root"] = counts.get("outside the root", 0) + 1
+                continue
+            index_file(c, kind, full, counts)
 
 
 def index_file(c, kind, full, counts):
     try:
+        if os.path.islink(full):
+            counts["symlink skipped"] = counts.get("symlink skipped", 0) + 1
+            return
         st = os.stat(full)
         if st.st_size > MAX_BYTES:
             counts["too big"] = counts.get("too big", 0) + 1
@@ -222,7 +252,8 @@ def index_github(c, repo, counts, limit=200):
         for what in ("issue", "pr"):
             items += [(what, x) for x in gh([what, "list", "-R", repo, "--state", "all",
                                              "--limit", str(limit), "--json",
-                                             "number,title,body,state,updatedAt,comments"])]
+                                             "number,title,body,state,updatedAt,comments,"
+                                             "author,authorAssociation"])]
     except Exception as e:
         print("  GitHub skipped for %s: %s" % (repo, e), file=sys.stderr)
         counts["github skipped"] = 1
@@ -230,14 +261,33 @@ def index_github(c, repo, counts, limit=200):
     for what, it in items:
         path = "%s#%s" % (repo, it["number"])
         kind = "issue" if what == "issue" else "pull-request"
-        body = [it.get("title") or "", it.get("body") or ""]
+        author = ((it.get("author") or {}).get("login")) or ""
+        # Anyone can open an issue on a public repository and type "Decision: ... by <someone>".
+        # Only an insider's OWN body may carry a decision, and it is attributed to the login the
+        # API reports, not to the name in the text. Comments are indexed for search either way:
+        # worth finding, never evidence of what the project decided.
+        insider = (it.get("authorAssociation") or "").upper() in ("OWNER", "MEMBER", "COLLABORATOR")
+        own_body = "# %s\n\n%s" % (it.get("title") or path, it.get("body") or "")
+        parts = [own_body]
         for cm in (it.get("comments") or []):
             who = ((cm.get("author") or {}).get("login")) or "someone"
-            body.append("\n--- comment from %s\n%s" % (who, cm.get("body") or ""))
-        text = "# %s\n\n%s" % (it.get("title") or path, "\n\n".join(x for x in body[1:] if x))
-        state = put_source(c, "github", path, (it.get("title") or path)[:200], text, kind,
+            parts.append("\n--- comment from %s (comments are not decisions)\n%s"
+                         % (who, cm.get("body") or ""))
+        # The decision scan runs over the body only, so a comment can never contribute one.
+        state = put_source(c, "github", path, (it.get("title") or path)[:200],
+                           "\n\n".join(parts), kind,
                            {"number": it["number"], "state": it.get("state"),
-                            "updated": it.get("updatedAt"), "repo": repo})
+                            "updated": it.get("updatedAt"), "repo": repo, "author": author,
+                            "author_association": it.get("authorAssociation"),
+                            "decisions_trusted": insider},
+                           decisions=False)
+        if insider and state != "same":
+            for d in find_decisions(own_body, author or None):
+                sid = c.execute("SELECT id FROM sources WHERE path=?", (path,)).fetchone()["id"]
+                c.execute("""INSERT INTO decisions(source_id,topic,text,decided_on,decided_by,line)
+                             VALUES(?,?,?,?,?,?)""",
+                          (sid, d["topic"] or path, d["text"], d["decided_on"], d["decided_by"],
+                           d["line"]))
         counts[state] = counts.get(state, 0) + 1
 
 

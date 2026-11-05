@@ -19,7 +19,7 @@ Settings, from the environment or .doc-index/config (plain KEY="value" lines, ne
   DOC_INDEX_CTX    context window used by `size` (default 200000)
   DOC_INDEX_WARN   warn at this percent of it (default 10)
 """
-import argparse, os, re, shutil, subprocess, sys
+import argparse, os, plistlib, re, shlex, shutil, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -175,20 +175,16 @@ def cmd_refresh(a):
     os.execv(sys.executable, cmd)
 
 
-PLIST = """<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>%(label)s</string>
-  <key>ProgramArguments</key><array>
-    <string>%(python)s</string><string>-I</string><string>%(indexer)s</string>
-    <string>--db</string><string>%(db)s</string><string>refresh</string>
-%(roots)s  </array>
-  <key>WorkingDirectory</key><string>%(cwd)s</string>
-  <key>StartInterval</key><integer>%(seconds)d</integer>
-  <key>StandardOutPath</key><string>%(log)s</string>
-  <key>StandardErrorPath</key><string>%(log)s</string>
-</dict></plist>
-"""
+def safe_arg(v, what):
+    """A path or root spec that is safe to put in a launchd argument or a shell line.
+
+    plistlib and shlex.quote handle quoting, but a newline or a NUL in a scheduled command is
+    never anything but a mistake or an attempt, and these values can come from a config file.
+    """
+    s = str(v)
+    if any(ch in s for ch in "\n\r\x00"):
+        sys.exit("refusing to schedule: %s contains a newline or a null byte (%r)" % (what, s[:80]))
+    return s
 
 
 def cmd_schedule(a):
@@ -205,23 +201,34 @@ def cmd_schedule(a):
         else:
             print("nothing scheduled here" if mac else "remove the cron line by hand (crontab -e)")
         return
-    roots = "".join('    <string>--root</string><string>%s</string>\n' % r
-                    for r in ["docs=" + os.path.abspath(DOCS)] + (a.root or []))
-    for g in a.github or []:
-        roots += '    <string>--github</string><string>%s</string>\n' % g
+    if a.every < 1:
+        sys.exit("--every is in minutes and must be at least 1")
+    indexer = os.path.join(ROOT, "server", "indexer.py")
     log = os.path.abspath(os.path.join(os.path.dirname(db_path()), "refresh.log"))
     os.makedirs(os.path.dirname(log), exist_ok=True)
+    argv = [shutil.which("python3") or sys.executable, "-I", indexer, "--db", db_path(), "refresh",
+            "--root", "docs=" + os.path.abspath(DOCS)]
+    for r in a.root or []:
+        argv += ["--root", r]
+    for g in a.github or []:
+        argv += ["--github", g]
+    argv = [safe_arg(x, "a path or root") for x in argv]
     if not mac:
-        line = "*/%d * * * * cd %s && %s -I %s --db %s refresh --root docs=%s >> %s 2>&1" % (
-            a.every, os.getcwd(), sys.executable, os.path.join(ROOT, "server", "indexer.py"),
-            db_path(), os.path.abspath(DOCS), log)
+        # Printed for the user to paste, so every value is quoted: a docs path with a space or a
+        # semicolon in it would otherwise become a second command in their crontab.
+        line = "*/%d * * * * cd %s && %s >> %s 2>&1" % (
+            a.every, shlex.quote(os.getcwd()), " ".join(shlex.quote(x) for x in argv),
+            shlex.quote(log))
         print("not macOS: add this line with `crontab -e`\n  " + line)
         return
     os.makedirs(os.path.dirname(plist), exist_ok=True)
-    open(plist, "w").write(PLIST % {
-        "label": label, "python": shutil.which("python3") or sys.executable,
-        "indexer": os.path.join(ROOT, "server", "indexer.py"), "db": db_path(),
-        "roots": roots, "cwd": os.getcwd(), "seconds": a.every * 60, "log": log})
+    # plistlib, not a string template: a value containing </string> would otherwise let a config
+    # file add arguments to a job that launchd runs on a timer.
+    with open(plist, "wb") as f:
+        plistlib.dump({"Label": label, "ProgramArguments": argv,
+                       "WorkingDirectory": safe_arg(os.getcwd(), "the working directory"),
+                       "StartInterval": a.every * 60,
+                       "StandardOutPath": log, "StandardErrorPath": log}, f)
     subprocess.run(["launchctl", "bootout", "gui/%d/%s" % (os.getuid(), label)], capture_output=True)
     p = subprocess.run(["launchctl", "bootstrap", "gui/%d" % os.getuid(), plist],
                        capture_output=True, text=True)

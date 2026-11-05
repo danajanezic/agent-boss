@@ -59,3 +59,11 @@ Decided: rice plots are polygons with shared bunds, 2026-11-01 by Dana.
 A date makes supersession work, since `current_decision` orders by it, and a name makes it clear
 whose call it was. The heading the line sits under becomes the topic, so put a decision under a
 heading that names what it is about.
+
+**Who is allowed to decide.** Anyone can open an issue on a public repository and type
+"Decision: X, decided by <your name>". So from GitHub, only an issue or pull request **body**
+written by an OWNER, MEMBER or COLLABORATOR becomes a decision, it is attributed to the login the
+API reports rather than any name in the text, and comments never become decisions however they are
+phrased. Comments are still indexed and searchable: worth finding, not evidence of what the project
+decided. A date in the future is dropped, so a line dated 2099 cannot outrank a real one. Documents
+in your own repository are trusted, because committing to it is the permission.
