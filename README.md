@@ -30,6 +30,10 @@ claude plugin marketplace add danajanezic/agent-boss
 claude plugin install soda-fountain@agent-boss
 ```
 
+## Planned work
+
+- [docs/shared-memory-brief.md](docs/shared-memory-brief.md): how to give a team of sessions a mailbox that survives restarts, a Stop hook that parks lanes as well as the orchestrator, project rules split into an index and full text, and an optional searchable project history. Written from a setup running 8 to 10 sessions a day, with the schema, command surface and acceptance checks for each piece.
+
 ## Install
 
 ```
